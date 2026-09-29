@@ -48,7 +48,7 @@ CACHE_ROOT = Path(os.environ.get(
 )).expanduser()
 
 CONTEXT_TOOLS = {
-    "repo_overview", "repo_search", "symbol_context",
+    "repo_overview", "repo_search", "symbol_context", "repo_changes",
     "semantic_status", "semantic_find", "dependency_context",
     "change_impact", "context_bundle",
 }
@@ -716,6 +716,8 @@ def external_status(args: dict[str, Any]) -> dict[str, Any]:
 
     _require_kind(argv, {"external_status"})
     state, task = _current_task(root)
+    if task.get("status") != "active":
+        raise ValueError("Task is not active; external polling is closed after completion")
     checks = state.setdefault("status_checks", {})
     used = int(checks.get(key, 0))
     if used >= MAX_STATUS_CHECKS:
@@ -763,6 +765,8 @@ def record_verification(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("evidence is required")
 
     state, task = _current_task(root)
+    if task.get("status") != "active":
+        raise ValueError("Task is not active; verification evidence is immutable after completion")
     task.setdefault("checks", {})[name] = {
         "status": status,
         "evidence": evidence[:4000],
@@ -961,7 +965,15 @@ def _execute_tool(name: str, args: dict[str, Any]) -> Any:
     root = _resolve_root(args.get("repo_path"))
     state = _load_state(root)
     task = state.get("task")
-    if not isinstance(task, dict) or task.get("status") != "active":
+    if not isinstance(task, dict):
+        return TOOLS[name][0](args)
+    if task.get("status") == "complete":
+        return {
+            "blocked": True,
+            "reason": "TASK_ALREADY_COMPLETE",
+            "guidance": "Start a new task if additional repository work is required.",
+        }
+    if task.get("status") != "active":
         return TOOLS[name][0](args)
 
     budget = task.setdefault("context_budget", context_budget.init_budget())
