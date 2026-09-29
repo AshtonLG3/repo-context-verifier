@@ -80,6 +80,7 @@ class ServerTests(unittest.TestCase):
                 })
                 self.assertEqual(result["check"]["status"], "pass")
                 self.assertIn("BUILD_COMPLETE", result["stop_recommendation"])
+                self.assertEqual(len(result["artifacts"][0]["sha256"]), 64)
                 self.assertTrue(server.task_finish({"repo_path": str(root)})["finished"])
             finally:
                 server.CACHE_ROOT = old
@@ -143,13 +144,102 @@ class ServerTests(unittest.TestCase):
                 status = server.semantic_status({"repo_path": str(root)})
                 self.assertTrue(status["indexed"])
                 self.assertFalse(status["stale"])
+                bundle = server.context_bundle({
+                    "repo_path": str(root),
+                    "query": "clock user screen",
+                    "limit": 5,
+                })
+                ranked_paths = [x["path"] for x in bundle["ranked_files"]]
+                self.assertIn("service.py", ranked_paths)
+                self.assertIn("screen.py", ranked_paths)
+                (root / "service.py").write_text(
+                    "def clock_user():\n    return False\n", encoding="utf-8"
+                )
+                dirty_status = server.semantic_status({"repo_path": str(root)})
+                self.assertTrue(dirty_status["stale"])
+                self.assertTrue(dirty_status["worktree_dirty"])
+            finally:
+                server.CACHE_ROOT = old
+
+    def test_context_budget_suppresses_duplicate_requests_and_reports(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            self.make_repo(root)
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                server.task_begin({
+                    "repo_path": str(root),
+                    "goal": "Inspect toast behavior",
+                    "acceptance": ["find toast implementation"],
+                    "required_checks": [],
+                    "max_context_chars": 20000,
+                    "max_context_calls": 5,
+                })
+                first = server._execute_tool("repo_search", {
+                    "repo_path": str(root),
+                    "term": "toast",
+                })
+                self.assertIn("matches", first)
+                self.assertIn("_sentinel_context_budget", first)
+
+                duplicate = server._execute_tool("repo_search", {
+                    "repo_path": str(root),
+                    "term": "toast",
+                })
+                self.assertTrue(duplicate["blocked"])
+                self.assertEqual(duplicate["reason"], "DUPLICATE_CONTEXT_SUPPRESSED")
+
+                status = server.context_budget_status({"repo_path": str(root)})
+                self.assertEqual(status["calls_used"], 1)
+                self.assertEqual(status["duplicates_suppressed"], 1)
+
+                extended = server.context_budget_extend({
+                    "repo_path": str(root),
+                    "extra_chars": 20000,
+                    "extra_calls": 3,
+                    "reason": "Need to trace a separate error path before implementation.",
+                })
+                self.assertTrue(extended["extended"])
+                report = server.task_report({"repo_path": str(root)})
+                self.assertEqual(report["context_budget"]["extensions_used"], 1)
+                self.assertIn("not ChatGPT/Codex token", report["note"])
+            finally:
+                server.CACHE_ROOT = old
+
+    def test_stop_controller_blocks_context_after_completion(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            self.make_repo(root)
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                server.task_begin({
+                    "repo_path": str(root),
+                    "goal": "Inspect and finish",
+                    "acceptance": [],
+                    "required_checks": [],
+                })
+                self.assertTrue(server.task_finish({"repo_path": str(root)})["finished"])
+                blocked = server._execute_tool("repo_search", {
+                    "repo_path": str(root),
+                    "term": "toast",
+                })
+                self.assertTrue(blocked["blocked"])
+                self.assertEqual(blocked["reason"], "TASK_ALREADY_COMPLETE")
+                with self.assertRaises(ValueError):
+                    server.external_status({
+                        "repo_path": str(root),
+                        "argv": ["railway", "status"],
+                        "key": "railway",
+                    })
             finally:
                 server.CACHE_ROOT = old
 
     def test_mcp_lists_control_tools(self):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in response["result"]["tools"]}
-        self.assertTrue({"build_artifact", "external_status", "task_finish", "symbol_context", "semantic_refresh", "semantic_find", "dependency_context", "change_impact"} <= names)
+        self.assertTrue({"build_artifact", "external_status", "task_finish", "symbol_context", "semantic_refresh", "semantic_find", "dependency_context", "change_impact", "context_bundle", "context_budget_status", "context_budget_extend", "task_report"} <= names)
 
     def test_stdio_initialization(self):
         request = json.dumps({
@@ -164,7 +254,7 @@ class ServerTests(unittest.TestCase):
         header, body = result.stdout.split(b"\r\n\r\n", 1)
         self.assertIn(b"Content-Length:", header)
         payload = json.loads(body)
-        self.assertEqual(payload["result"]["serverInfo"]["version"], "0.3.0")
+        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.0.0")
         self.assertIn("stop running tools", payload["result"]["instructions"])
 
 

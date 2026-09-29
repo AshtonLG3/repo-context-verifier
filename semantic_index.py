@@ -34,6 +34,8 @@ IMPORT_PATTERNS = [
 ]
 
 IDENTIFIER = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]{2,}\b")
+MAX_REFS_PER_FILE = 5000
+
 STOP_WORDS = {
     "return", "class", "function", "interface", "import", "export", "from", "const",
     "let", "var", "public", "private", "protected", "static", "async", "await", "while",
@@ -138,7 +140,8 @@ def parse_source(path: str, text: str) -> tuple[list[dict[str, Any]], list[dict[
             if lowered in STOP_WORDS or ident in seen:
                 continue
             seen.add(ident)
-            refs.append({"symbol": ident, "path": path, "line": number})
+            if len(refs) < MAX_REFS_PER_FILE:
+                refs.append({"symbol": ident, "path": path, "line": number})
 
     return symbols, imports, refs
 
@@ -364,6 +367,102 @@ def impact_for_paths(cache_root: Path, repo_key: str, changed_paths: list[str], 
             "defined_symbols_considered": sorted(defined)[:200],
             "candidate_affected_files": normalized[:limit],
             "note": "Impact is conservative heuristic evidence, not proof of complete dependency coverage.",
+        }
+    finally:
+        conn.close()
+
+
+def rank_context(
+    cache_root: Path,
+    repo_key: str,
+    query: str,
+    changed_paths: list[str] | None = None,
+    limit: int = 12,
+) -> dict[str, Any]:
+    """Rank likely relevant files for a task/query using the persistent index."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query is required")
+    limit = max(3, min(int(limit), 25))
+    changed = set(changed_paths or [])
+    tokens = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z_$][A-Za-z0-9_$]{2,}", query)
+        if token.lower() not in STOP_WORDS
+    }
+    if not tokens:
+        tokens = {query.strip().lower()[:80]}
+
+    conn = connect(cache_root, repo_key)
+    try:
+        scores: dict[str, float] = {}
+        reasons: dict[str, set[str]] = {}
+        symbols_by_path: dict[str, set[str]] = {}
+
+        def bump(path: str, amount: float, reason: str, symbol: str | None = None) -> None:
+            scores[path] = scores.get(path, 0.0) + amount
+            reasons.setdefault(path, set()).add(reason)
+            if symbol:
+                symbols_by_path.setdefault(path, set()).add(symbol)
+
+        for path in changed:
+            bump(path, 8.0, "changed file")
+
+        indexed_files = [row["path"] for row in conn.execute("SELECT path FROM files")]
+        for path in indexed_files:
+            lower_path = path.lower()
+            for token in tokens:
+                if token in lower_path:
+                    bump(path, 4.0, f"path matches '{token}'")
+
+        for token in tokens:
+            exact = list(conn.execute(
+                "SELECT name,path,line FROM symbols WHERE lower(name)=? LIMIT 80",
+                (token,),
+            ))
+            for row in exact:
+                bump(row["path"], 10.0, f"defines '{row['name']}'", row["name"])
+
+            partial = list(conn.execute(
+                "SELECT name,path,line FROM symbols WHERE lower(name) LIKE ? AND lower(name)<>? LIMIT 80",
+                (f"%{token}%", token),
+            ))
+            for row in partial:
+                bump(row["path"], 6.0, f"related symbol '{row['name']}'", row["name"])
+
+            refs = list(conn.execute(
+                "SELECT symbol,path,line FROM refs WHERE lower(symbol)=? LIMIT 120",
+                (token,),
+            ))
+            for row in refs:
+                bump(row["path"], 2.5, f"references '{row['symbol']}'", row["symbol"])
+
+            imports = list(conn.execute(
+                "SELECT source_path,target,line FROM imports WHERE lower(target) LIKE ? LIMIT 80",
+                (f"%{token}%",),
+            ))
+            for row in imports:
+                bump(row["source_path"], 2.0, f"imports '{row['target']}'")
+
+        ranked = []
+        for path, score in scores.items():
+            ranked.append({
+                "path": path,
+                "score": round(score, 2),
+                "reasons": sorted(reasons.get(path, set()))[:8],
+                "symbols": sorted(symbols_by_path.get(path, set()))[:12],
+                "changed": path in changed,
+            })
+        ranked.sort(key=lambda x: (-x["score"], not x["changed"], x["path"]))
+
+        return {
+            "query": query,
+            "tokens": sorted(tokens),
+            "ranked_files": ranked[:limit],
+            "considered_files": len(indexed_files),
+            "note": (
+                "Ranking combines changed-file, path, definition, reference, and import signals. "
+                "It is for context selection, not proof of dependency coverage."
+            ),
         }
     finally:
         conn.close()
