@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1
+
+- Fixed stdio transport to use newline-delimited UTF-8 JSON-RPC as required by MCP instead of `Content-Length` framing
+- Replaced the self-confirming framing test with newline-delimited transport coverage
+- Added an end-to-end test through the official MCP Python client SDK
+- Added best-effort redaction for common credentials in returned source snippets and governed command output
+- Kept runtime dependencies standard-library-only; the MCP SDK is test-only
+
+# Changelog
+
 ## 1.0.0
 
 - Added adaptive per-task context budgeting
