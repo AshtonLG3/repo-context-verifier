@@ -1,16 +1,20 @@
 {
   "name": "repo-context-verifier",
-  "version": "0.2.0",
-  "description": "Local Codex control bridge for bounded repo context, process governance, artifact-aware stopping, and evidence-based completion.",
-  "author": {"name": "AshtonLG3"},
+  "version": "0.3.0",
+  "description": "Local Codex control bridge with persistent semantic repo memory, process governance, artifact-aware stopping, and evidence-based completion.",
+  "author": {
+    "name": "AshtonLG3"
+  },
   "skills": "./skills/",
   "interface": {
     "displayName": "Repo Context Verifier",
-    "shortDescription": "Govern context, builds, polling and verification",
-    "longDescription": "Local MCP control bridge that bounds repository orientation and command output, recognizes completed build artifacts, limits asynchronous deployment polling, and refuses full completion until required evidence is recorded.",
+    "shortDescription": "Semantic repo memory plus build and verification governance",
+    "longDescription": "Local MCP bridge that persistently indexes repository symbols and references, bounds context and command output, recognizes completed build artifacts, limits asynchronous deployment polling, and refuses full completion until required evidence is recorded.",
     "developerName": "AshtonLG3",
     "category": "Productivity",
-    "capabilities": ["Interactive"],
+    "capabilities": [
+      "Interactive"
+    ],
     "defaultPrompt": "Use Repo Context Verifier to govern this repository task from bounded orientation through direct verification, then stop when the required deliverables are complete."
   },
   "mcpServers": "./.mcp.json"
