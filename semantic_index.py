@@ -34,6 +34,8 @@ IMPORT_PATTERNS = [
 ]
 
 IDENTIFIER = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]{2,}\b")
+MAX_REFS_PER_FILE = 5000
+
 STOP_WORDS = {
     "return", "class", "function", "interface", "import", "export", "from", "const",
     "let", "var", "public", "private", "protected", "static", "async", "await", "while",
@@ -138,7 +140,8 @@ def parse_source(path: str, text: str) -> tuple[list[dict[str, Any]], list[dict[
             if lowered in STOP_WORDS or ident in seen:
                 continue
             seen.add(ident)
-            refs.append({"symbol": ident, "path": path, "line": number})
+            if len(refs) < MAX_REFS_PER_FILE:
+                refs.append({"symbol": ident, "path": path, "line": number})
 
     return symbols, imports, refs
 
