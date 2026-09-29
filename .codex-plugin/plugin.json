@@ -1,6 +1,6 @@
 {
   "name": "repo-context-verifier",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local Codex control bridge with persistent semantic repo memory, adaptive context budgets, process governance, artifact-aware stopping, and evidence-based completion.",
   "author": {
     "name": "AshtonLG3"

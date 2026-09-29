@@ -20,7 +20,7 @@ from typing import Any
 import semantic_index
 import context_budget
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 MAX_FILES = 4000
 MAX_MATCHES = 50
 MAX_AREAS = 40
@@ -105,6 +105,38 @@ def _clip(text: str, limit: int = MAX_OUTPUT_CHARS) -> tuple[str, bool]:
     head = text[: limit // 2]
     tail = text[-limit // 2 :]
     return head + "\n...[output truncated by Sentinel]...\n" + tail, True
+
+
+_SECRET_ASSIGNMENT = re.compile(
+    r"""(?ix)
+    \b(api[_-]?key|secret|client[_-]?secret|access[_-]?token|refresh[_-]?token|
+       token|password|passwd|authorization)\b
+    (\s*[:=]\s*)
+    (["']?)([^\s"',;}{]+)(\3)
+    """
+)
+_SECRET_TOKEN_PATTERNS = [
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+]
+_PRIVATE_KEY_MARKER = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+
+
+def _redact_sensitive_text(text: str) -> str:
+    """Best-effort redaction for common credential material in returned context/output."""
+    def repl(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{match.group(2)}[REDACTED]"
+
+    redacted = _SECRET_ASSIGNMENT.sub(repl, text)
+    for pattern in _SECRET_TOKEN_PATTERNS:
+        redacted = pattern.sub("[REDACTED_SECRET]", redacted)
+    if _PRIVATE_KEY_MARKER.search(redacted):
+        redacted = _PRIVATE_KEY_MARKER.sub("-----BEGIN [REDACTED] PRIVATE KEY-----", redacted)
+    return redacted
 
 
 def _repo_key(root: Path) -> str:
@@ -221,7 +253,7 @@ def repo_search(args: dict[str, Any]) -> dict[str, Any]:
                         matches.append({
                             "path": path,
                             "line": number,
-                            "text": line.strip()[:240],
+                            "text": _redact_sensitive_text(line.strip())[:240],
                         })
                         if len(matches) >= max_matches:
                             return {"matches": matches, "truncated": True}
@@ -250,7 +282,7 @@ def symbol_context(args: dict[str, Any]) -> dict[str, Any]:
                 for number, line in enumerate(stream, 1):
                     if symbol not in line:
                         continue
-                    row = {"path": path, "line": number, "text": line.strip()[:240]}
+                    row = {"path": path, "line": number, "text": _redact_sensitive_text(line.strip())[:240]}
                     if any(p.search(line) for p in definition_patterns):
                         if len(definitions) < 20:
                             definitions.append(row)
@@ -581,6 +613,7 @@ def _run_process(root: Path, argv: list[str], timeout: int) -> dict[str, Any]:
         err = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         combined = out + (("\n" + err) if err else "")
 
+    combined = _redact_sensitive_text(combined)
     clipped, truncated = _clip(combined)
     return {
         "argv": argv,
@@ -933,25 +966,27 @@ def _schema_for(name: str) -> dict[str, Any]:
 
 
 def _send(payload: dict[str, Any]) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    sys.stdout.buffer.write(b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data)
-    sys.stdout.buffer.flush()
+    # MCP stdio uses one UTF-8 JSON-RPC message per line. It is not LSP framing.
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if "\n" in data or "\r" in data:
+        raise ValueError("Serialized MCP message must not contain embedded newlines")
+    sys.stdout.write(data + "\n")
+    sys.stdout.flush()
 
 
 def _receive() -> dict[str, Any] | None:
-    headers: dict[str, str] = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode("ascii", "replace").partition(":")
-        headers[key.lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    if not 0 < length <= 1_000_000:
-        raise ValueError("Invalid request length")
-    payload = json.loads(sys.stdin.buffer.read(length))
+    # Read exactly one newline-delimited MCP JSON-RPC message.
+    line = sys.stdin.buffer.readline(1_000_002)
+    if not line:
+        return None
+    if len(line) > 1_000_001:
+        raise ValueError("MCP request exceeds maximum line length")
+    if not line.endswith(b"\n"):
+        raise ValueError("MCP stdio request must be newline-delimited")
+    raw = line.rstrip(b"\r\n")
+    if not raw:
+        raise ValueError("Empty MCP message")
+    payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("JSON-RPC request must be an object")
     return payload

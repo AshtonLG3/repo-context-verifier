@@ -1,6 +1,6 @@
 # Repo Context Verifier — Sentinel MCP
 
-**Version 1.0.0**
+**Version 1.0.1**
 
 Sentinel is a local-first MCP control bridge for Codex repository work. It is designed for a specific failure mode: the strongest coding model can still waste expensive context rediscovering a repository, keep waiting after an APK is already built, repeatedly poll an asynchronous deployment, or declare success from green tests while a user-visible defect remains.
 
@@ -121,7 +121,7 @@ Requirements:
 - Git on `PATH`
 - Codex or another MCP client that can launch a local stdio server
 
-The server uses only the Python standard library.
+The runtime server uses only the Python standard library. CI also installs the official MCP Python client SDK so the stdio transport is tested end-to-end through a real MCP client.
 
 Portable MCP configuration:
 
@@ -151,7 +151,7 @@ Sentinel keeps its own state outside the target repository by default:
 
 Set `SENTINEL_HOME` to move the cache.
 
-Repository orientation skips common generated directories and secret-like filenames. No hosted indexing service is required and Sentinel itself does not upload source code elsewhere.
+Repository orientation skips common generated directories and secret-like filenames. Returned source snippets and governed command output also apply best-effort redaction for common credential assignments and token formats. This reduces accidental exposure but is not a complete secret scanner, so repositories should still keep credentials out of source. No hosted indexing service is required and Sentinel itself does not upload source code elsewhere.
 
 The MCP client still has whatever access you explicitly give it, and governed build/status tools execute allowlisted local commands. Treat installation of any MCP server with process tools as code-execution access to the selected checkout.
 
