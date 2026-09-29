@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any
 
 import semantic_index
+import context_budget
 
-VERSION = "0.3.0"
+VERSION = "1.0.0"
 MAX_FILES = 4000
 MAX_MATCHES = 50
 MAX_AREAS = 40
@@ -45,6 +46,12 @@ CACHE_ROOT = Path(os.environ.get(
     "SENTINEL_HOME",
     str(Path.home() / ".repo-context-verifier"),
 )).expanduser()
+
+CONTEXT_TOOLS = {
+    "repo_overview", "repo_search", "symbol_context",
+    "semantic_status", "semantic_find", "dependency_context",
+    "change_impact", "context_bundle",
+}
 
 
 def _git(root: Path, *args: str, timeout: int = 20) -> str:
@@ -146,6 +153,32 @@ def _current_task(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(task, dict):
         raise ValueError("No active task. Call task_begin first.")
     return state, task
+
+
+def _dirty_paths(root: Path) -> list[str]:
+    raw = _git(root, "ls-files", "-m", "-o", "--exclude-standard", "-z").split("\0")
+    return [p for p in raw if p][:200]
+
+
+def _worktree_generation(root: Path) -> str:
+    """Cheap generation fingerprint for duplicate-context suppression."""
+    head = _git(root, "rev-parse", "HEAD").strip()
+    pieces = [head]
+    for rel in _dirty_paths(root):
+        try:
+            stat = (root / rel).stat()
+            pieces.append(f"{rel}:{stat.st_size}:{stat.st_mtime_ns}")
+        except OSError:
+            pieces.append(f"{rel}:missing")
+    return hashlib.sha256("\n".join(pieces).encode("utf-8")).hexdigest()[:24]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def repo_overview(args: dict[str, Any]) -> dict[str, Any]:
@@ -252,8 +285,14 @@ def semantic_status(args: dict[str, Any]) -> dict[str, Any]:
     root = _resolve_root(args.get("repo_path"))
     status = semantic_index.index_status(CACHE_ROOT, _repo_key(root))
     status["current_head"] = _git(root, "rev-parse", "HEAD").strip()
+    dirty = _dirty_paths(root)
+    status["dirty_paths"] = dirty[:50]
+    status["worktree_dirty"] = bool(dirty)
     if status.get("indexed"):
-        status["stale"] = status.get("meta", {}).get("head") != status["current_head"]
+        status["stale"] = (
+            status.get("meta", {}).get("head") != status["current_head"]
+            or bool(dirty)
+        )
     return status
 
 
@@ -293,6 +332,48 @@ def change_impact(args: dict[str, Any]) -> dict[str, Any]:
         changed,
         args.get("limit", 60),
     )
+
+
+
+def context_bundle(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    query = args.get("query", "")
+    limit = args.get("limit", 12)
+    refresh_if_stale = args.get("refresh_if_stale", True)
+
+    status = semantic_index.index_status(CACHE_ROOT, _repo_key(root))
+    current_head = _git(root, "rev-parse", "HEAD").strip()
+    dirty = _dirty_paths(root)
+    stale = (
+        not status.get("indexed")
+        or status.get("meta", {}).get("head") != current_head
+        or bool(dirty)
+    )
+    refreshed = False
+    if stale and refresh_if_stale:
+        semantic_index.refresh_index(
+            CACHE_ROOT,
+            _repo_key(root),
+            root,
+            _tracked_files(root),
+            current_head,
+        )
+        refreshed = True
+
+    ranked = semantic_index.rank_context(
+        CACHE_ROOT,
+        _repo_key(root),
+        query,
+        dirty,
+        limit,
+    )
+    ranked["index_refreshed"] = refreshed
+    ranked["worktree_dirty"] = bool(dirty)
+    ranked["guidance"] = (
+        "Open only the highest-ranked files needed to resolve the task. "
+        "Use dependency_context or change_impact for focused follow-up rather than broad rescans."
+    )
+    return ranked
 
 
 def repo_changes(args: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +425,10 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
         "deliverables": [],
         "commands": 0,
         "output_chars": 0,
+        "context_budget": context_budget.init_budget(
+            args.get("max_context_chars"),
+            args.get("max_context_calls"),
+        ),
     }
     state["task"] = task
     state["status_checks"] = {}
@@ -352,7 +437,11 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
         "task_id": task_id,
         "status": "active",
         "required_checks": task["required_checks"],
-        "guidance": "Record evidence for each required check before task_finish.",
+        "context_budget": context_budget.status(task["context_budget"]),
+        "guidance": (
+            "Use context_bundle first for orientation, record evidence for required checks, "
+            "and stop when task_finish succeeds."
+        ),
     }
 
 
@@ -362,6 +451,64 @@ def task_status(args: dict[str, Any]) -> dict[str, Any]:
     return {
         "task": state.get("task"),
         "external_status_checks": state.get("status_checks", {}),
+    }
+
+
+
+def context_budget_status(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    _, task = _current_task(root)
+    budget = task.setdefault("context_budget", context_budget.init_budget())
+    return context_budget.status(budget)
+
+
+def context_budget_extend(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    state, task = _current_task(root)
+    if task.get("status") != "active":
+        raise ValueError("Task is not active")
+    budget = task.setdefault("context_budget", context_budget.init_budget())
+    updated = context_budget.extend(
+        budget,
+        args.get("extra_chars", 0),
+        args.get("extra_calls", 0),
+        args.get("reason", ""),
+    )
+    state["task"] = task
+    _save_state(root, state)
+    return {
+        "extended": True,
+        "budget": updated,
+        "guidance": "Use the added context only for the stated correctness reason.",
+    }
+
+
+def task_report(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    state = _load_state(root)
+    task = state.get("task")
+    if not isinstance(task, dict):
+        raise ValueError("No task state is available")
+    budget = task.get("context_budget") or context_budget.init_budget()
+    checks = task.get("checks", {})
+    return {
+        "task_id": task.get("id"),
+        "goal": task.get("goal"),
+        "status": task.get("status"),
+        "duration_seconds": round(
+            (task.get("finished_at", time.time()) - task.get("started_at", time.time())),
+            2,
+        ),
+        "required_checks": task.get("required_checks", []),
+        "checks": checks,
+        "deliverables": task.get("deliverables", []),
+        "commands": task.get("commands", 0),
+        "command_output_chars": task.get("output_chars", 0),
+        "context_budget": context_budget.status(budget),
+        "external_status_checks": state.get("status_checks", {}),
+        "note": (
+            "Context metrics cover Sentinel-returned context only; they are not ChatGPT/Codex token or quota measurements."
+        ),
     }
 
 
@@ -500,6 +647,7 @@ def build_artifact(args: dict[str, Any]) -> dict[str, Any]:
                 "size": stat.st_size,
                 "mtime": stat.st_mtime,
                 "fresh_for_task": stat.st_mtime >= started - 2,
+                "sha256": _sha256_file(candidate),
             })
         except OSError:
             continue
@@ -671,8 +819,12 @@ TOOLS = {
     "semantic_find": (semantic_find, "Query indexed symbol definitions and reference sites without rescanning the whole repository."),
     "dependency_context": (dependency_context, "Return candidate definitions, consumers, imports, and files related to an indexed symbol."),
     "change_impact": (change_impact, "Estimate candidate affected files from symbols defined in changed paths using the persistent index."),
+    "context_bundle": (context_bundle, "Rank a compact set of likely relevant files for the task, refreshing semantic memory when stale."),
     "task_begin": (task_begin, "Begin a governed task with acceptance criteria and required verification checks."),
-    "task_status": (task_status, "Read the current governed task, evidence, deliverables, and polling usage."),
+    "task_status": (task_status, "Read the current governed task, evidence, deliverables, polling usage, and context budget."),
+    "context_budget_status": (context_budget_status, "Show Sentinel context-call/output pressure for the active task."),
+    "context_budget_extend": (context_budget_extend, "Explicitly extend the active task context budget when correctness requires more repository context."),
+    "task_report": (task_report, "Return a compact task completion, verification, process, and context-budget report."),
     "run_bounded_command": (run_bounded_command, "Run one allowlisted local build/test/read command with a hard timeout and capped output."),
     "build_artifact": (build_artifact, "Run an allowlisted bounded build and verify that the expected artifact exists before returning."),
     "artifact_status": (artifact_status, "Inspect matching artifacts without starting or polling a build process."),
@@ -713,13 +865,29 @@ def _schema_for(name: str) -> dict[str, Any]:
             "base": {"type": "string", "default": "HEAD"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 60},
         })
+    elif name == "context_bundle":
+        properties.update({
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 3, "maximum": 25},
+            "refresh_if_stale": {"type": "boolean", "default": True},
+        })
+        required.append("query")
     elif name == "task_begin":
         properties.update({
             "goal": {"type": "string"},
             "acceptance": {"type": "array", "items": {"type": "string"}},
             "required_checks": {"type": "array", "items": {"type": "string"}},
+            "max_context_chars": {"type": "integer", "minimum": 20000, "maximum": 500000},
+            "max_context_calls": {"type": "integer", "minimum": 5, "maximum": 80},
         })
         required += ["goal", "acceptance", "required_checks"]
+    elif name == "context_budget_extend":
+        properties.update({
+            "extra_chars": {"type": "integer", "minimum": 0, "maximum": 120000},
+            "extra_calls": {"type": "integer", "minimum": 0, "maximum": 20},
+            "reason": {"type": "string"},
+        })
+        required += ["extra_chars", "extra_calls", "reason"]
     elif name == "run_bounded_command":
         properties.update({
             "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
@@ -785,6 +953,36 @@ def _receive() -> dict[str, Any] | None:
     return payload
 
 
+
+def _execute_tool(name: str, args: dict[str, Any]) -> Any:
+    if name not in CONTEXT_TOOLS:
+        return TOOLS[name][0](args)
+
+    root = _resolve_root(args.get("repo_path"))
+    state = _load_state(root)
+    task = state.get("task")
+    if not isinstance(task, dict) or task.get("status") != "active":
+        return TOOLS[name][0](args)
+
+    budget = task.setdefault("context_budget", context_budget.init_budget())
+    generation = _worktree_generation(root)
+    sig, blocked = context_budget.preflight(budget, name, args, generation)
+    if blocked is not None:
+        state["task"] = task
+        _save_state(root, state)
+        return blocked
+
+    value = TOOLS[name][0](args)
+    pressure = context_budget.record(budget, sig, name, value)
+    state["task"] = task
+    _save_state(root, state)
+
+    if isinstance(value, dict):
+        value = dict(value)
+        value["_sentinel_context_budget"] = pressure
+    return value
+
+
 def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     method = request.get("method")
     ident = request.get("id")
@@ -796,10 +994,11 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "repo-context-verifier", "version": VERSION},
             "instructions": (
-                "Prefer the persistent semantic index for orientation: refresh it when stale, then use semantic_find, "
-                "dependency_context, or change_impact before broad file reads. Start governed implementation work with "
-                "task_begin. Prefer build_artifact over manually waiting on build processes. external_status is limited "
-                "to two checks per task key. Record direct evidence for required checks. If task_finish succeeds, stop running tools."
+                "Start governed implementation work with task_begin. Prefer context_bundle for first-pass orientation, "
+                "then semantic_find, dependency_context, or change_impact for focused follow-up. Exact duplicate context "
+                "requests on an unchanged worktree are suppressed and context pressure is budgeted per task. Prefer "
+                "build_artifact over manually waiting on build processes. external_status is limited to two checks per "
+                "task key. Record direct evidence for required checks. If task_finish succeeds, stop running tools."
             ),
         }
     elif method == "tools/list":
@@ -815,7 +1014,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         if name not in TOOLS:
             raise ValueError("Unknown tool")
         try:
-            value = TOOLS[name][0](params.get("arguments", {}))
+            value = _execute_tool(name, params.get("arguments", {}))
             result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
         except Exception as exc:
             result = {
