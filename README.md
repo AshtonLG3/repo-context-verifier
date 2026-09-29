@@ -1,6 +1,6 @@
 # Repo Context Verifier — Sentinel MCP
 
-**Version 1.0.1**
+**Version 1.1.0**
 
 Sentinel is a local-first MCP control bridge for Codex repository work. It is designed for a specific failure mode: the strongest coding model can still waste expensive context rediscovering a repository, keep waiting after an APK is already built, repeatedly poll an asynchronous deployment, or declare success from green tests while a user-visible defect remains.
 
@@ -69,7 +69,7 @@ Tools:
 - `artifact_status`
 - `external_status`
 
-`build_artifact` runs a bounded build, verifies the expected artifact exists, records its size and SHA-256, and returns `BUILD_COMPLETE` when the build command succeeded. At that point the agent is instructed not to keep babysitting Gradle or another build process.
+`build_artifact` snapshots matching files before and after a bounded build. It returns `BUILD_COMPLETE` only when the command succeeds, inputs stay unchanged, and an artifact is newly produced or updated. Unchanged cached output is accepted only when a prior successful build record matches the command, source inputs and artifact hash. An unrelated successful command cannot validate an old APK. Artifact existence does not prove Android signing, version, installation or runtime behavior; those need separate checks.
 
 `external_status` is intentionally limited to two checks per task key. It is meant for asynchronous systems such as Railway where repeated polling can consume time and agent context without improving the code change.
 
@@ -94,7 +94,14 @@ For user-facing work, verification can cover:
 - artifact build
 - production/deployment state
 
-`task_finish` refuses full completion while any required check lacks passing evidence.
+Every task requires at least one nonblank acceptance criterion and required check. `task_finish` refuses completion when a required check lacks passing evidence, any recorded check fails, source inputs changed after verification, or evidence files changed or disappeared. Legacy empty plans cannot complete.
+
+Passing `record_verification` calls must provide an `evidence_kind`:
+
+- `command`: reference a `command_id` returned by `run_bounded_command`. Sentinel verifies the command exited successfully, did not time out, and still applies to the current source inputs. This proves command success, not the truth of an arbitrary behavior claim.
+- `observation`: supply `evidence_paths` containing 1–10 nonempty files inside the repository, such as screenshots or captured browser/device logs. Sentinel hashes these files and marks the record as a **reported observation**. It verifies the files' integrity, not what a screenshot or log means.
+
+Text alone cannot pass. Build checks are recorded by `build_artifact` and cannot be replaced with a generic observation. Existing 1.0.1 evidence must be recorded again using the new fields.
 
 After `task_finish` succeeds, the stop controller blocks further governed repository-context work and external polling for that task. New work should start a new task.
 

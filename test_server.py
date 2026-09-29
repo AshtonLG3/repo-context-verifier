@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -48,11 +49,14 @@ class ServerTests(unittest.TestCase):
                 })
                 blocked = server.task_finish({"repo_path": str(root)})
                 self.assertFalse(blocked["finished"])
+                (root / "observation.txt").write_text("Observed toast disappearance in the running UI", encoding="utf-8")
                 server.record_verification({
                     "repo_path": str(root),
                     "name": "behavior",
                     "status": "pass",
                     "evidence": "Observed disappearance in running UI",
+                    "evidence_kind": "observation",
+                    "evidence_paths": ["observation.txt"],
                 })
                 self.assertTrue(server.task_finish({"repo_path": str(root)})["finished"])
             finally:
@@ -95,8 +99,8 @@ class ServerTests(unittest.TestCase):
                 server.task_begin({
                     "repo_path": str(root),
                     "goal": "Deploy",
-                    "acceptance": [],
-                    "required_checks": [],
+                    "acceptance": ["Deployment status inspected"],
+                    "required_checks": ["deployment"],
                 })
                 args = {"repo_path": str(root), "argv": ["railway", "status"], "key": "railway"}
                 fake = {"argv": ["railway", "status"], "returncode": 0, "timed_out": False,
@@ -172,7 +176,7 @@ class ServerTests(unittest.TestCase):
                     "repo_path": str(root),
                     "goal": "Inspect toast behavior",
                     "acceptance": ["find toast implementation"],
-                    "required_checks": [],
+                    "required_checks": ["inspection"],
                     "max_context_chars": 20000,
                     "max_context_calls": 5,
                 })
@@ -217,9 +221,13 @@ class ServerTests(unittest.TestCase):
                 server.task_begin({
                     "repo_path": str(root),
                     "goal": "Inspect and finish",
-                    "acceptance": [],
-                    "required_checks": [],
+                    "acceptance": ["Repository status inspected"],
+                    "required_checks": ["inspection"],
                 })
+                command = server.run_bounded_command({"repo_path": str(root), "argv": ["git", "status", "--short"]})
+                server.record_verification({"repo_path": str(root), "name": "inspection", "status": "pass",
+                                            "evidence": "Inspected repository status", "evidence_kind": "command",
+                                            "command_id": command["command_id"]})
                 self.assertTrue(server.task_finish({"repo_path": str(root)})["finished"])
                 blocked = server._execute_tool("repo_search", {
                     "repo_path": str(root),
@@ -254,7 +262,7 @@ class ServerTests(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), 1)
         payload = json.loads(lines[0])
-        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.0.1")
+        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.1.0")
         self.assertIn("stop running tools", payload["result"]["instructions"])
 
     def test_returned_source_context_redacts_common_secret_values(self):
@@ -279,6 +287,98 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("1234567890ABCDEFGHIJKLMNOP", key["matches"][0]["text"])
             self.assertIn("[REDACTED]", password["matches"][0]["text"])
             self.assertNotIn("super-secret-password", password["matches"][0]["text"])
+
+    def test_empty_plans_and_legacy_empty_tasks_cannot_complete(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache, patch.object(server, "CACHE_ROOT", Path(cache)):
+            root = Path(td)
+            self.make_repo(root)
+            base = {"repo_path": td, "goal": "Verify", "acceptance": ["Observed behavior"], "required_checks": ["behavior"]}
+            for field in ("acceptance", "required_checks"):
+                for invalid in ([], ["  "]):
+                    with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                        server.task_begin({**base, field: invalid})
+            server._save_state(root, {"task": {"status": "active", "required_checks": [], "acceptance": ["behavior"]}})
+            self.assertFalse(server.task_finish({"repo_path": td})["finished"])
+
+    def test_unrelated_success_cannot_validate_old_artifact(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache, patch.object(server, "CACHE_ROOT", Path(cache)):
+            root = Path(td)
+            self.make_repo(root)
+            artifact = root / "old.apk"
+            artifact.write_bytes(b"old APK")
+            os.utime(artifact, (1000, 1000))
+            server.task_begin({"repo_path": td, "goal": "Build", "acceptance": ["Current APK"], "required_checks": ["build"]})
+            result = server.build_artifact({"repo_path": td, "argv": [sys.executable, "-m", "compileall", "scanner.py"], "artifact_glob": "old.apk"})
+            self.assertEqual(result["returncode"], 0)
+            self.assertEqual(result["check"]["status"], "fail")
+            self.assertEqual(result["artifacts"], [])
+            self.assertEqual(result["rejected_artifacts"][0]["path"], "old.apk")
+            self.assertFalse(server.task_finish({"repo_path": td})["finished"])
+
+    def test_verified_cached_build_and_artifact_tampering(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache, patch.object(server, "CACHE_ROOT", Path(cache)):
+            root = Path(td)
+            self.make_repo(root)
+            plan = {"repo_path": td, "goal": "Build", "acceptance": ["Compiled output"], "required_checks": ["build"]}
+            args = {"repo_path": td, "argv": [sys.executable, "-m", "compileall", "scanner.py"], "artifact_glob": "__pycache__/*.pyc"}
+            server.task_begin(plan)
+            built = server.build_artifact(args)
+            self.assertEqual(built["check"]["status"], "pass")
+            self.assertTrue(server.task_finish({"repo_path": td})["finished"])
+            server.task_begin(plan)
+            cached = server.build_artifact(args)
+            self.assertEqual(cached["check"]["status"], "pass")
+            self.assertEqual(cached["artifacts"][0]["provenance"], "verified_reuse")
+            output = root / cached["artifacts"][0]["path"]
+            output.write_bytes(b"tampered output")
+            self.assertFalse(server.task_finish({"repo_path": td})["finished"])
+
+    def test_build_evidence_expires_when_source_changes(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache, patch.object(server, "CACHE_ROOT", Path(cache)):
+            root = Path(td)
+            self.make_repo(root)
+            server.task_begin({"repo_path": td, "goal": "Build", "acceptance": ["Current output"], "required_checks": ["build"]})
+            server.build_artifact({"repo_path": td, "argv": [sys.executable, "-m", "compileall", "scanner.py"], "artifact_glob": "__pycache__/*.pyc"})
+            (root / "scanner.py").write_text("def changed():\n    return 2\n", encoding="utf-8")
+            result = server.task_finish({"repo_path": td})
+            self.assertFalse(result["finished"])
+            self.assertIn("build", result["stale_evidence"])
+
+    def test_verification_needs_real_current_evidence(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache, patch.object(server, "CACHE_ROOT", Path(cache)):
+            root = Path(td)
+            self.make_repo(root)
+            server.task_begin({"repo_path": td, "goal": "Verify", "acceptance": ["Tests pass"], "required_checks": ["tests"]})
+            evidence = {"repo_path": td, "name": "tests", "status": "pass", "evidence": "All good"}
+            with self.assertRaises(ValueError):
+                server.record_verification(evidence)
+            with self.assertRaises(ValueError):
+                server.record_verification({**evidence, "evidence_kind": "command", "command_id": "invented"})
+            failed = server.run_bounded_command({"repo_path": td, "argv": ["git", "rev-parse", "--verify", "missing-ref"]})
+            with self.assertRaises(ValueError):
+                server.record_verification({**evidence, "evidence_kind": "command", "command_id": failed["command_id"]})
+            command = server.run_bounded_command({"repo_path": td, "argv": ["git", "status", "--short"]})
+            server.record_verification({**evidence, "evidence_kind": "command", "command_id": command["command_id"]})
+            (root / "scanner.py").write_text("changed = True\n", encoding="utf-8")
+            self.assertFalse(server.task_finish({"repo_path": td})["finished"])
+            with self.assertRaises(ValueError):
+                server.record_verification({**evidence, "evidence_kind": "command", "command_id": command["command_id"]})
+
+    def test_observation_evidence_integrity_and_optional_failure(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache, patch.object(server, "CACHE_ROOT", Path(cache)):
+            root = Path(td)
+            self.make_repo(root)
+            server.task_begin({"repo_path": td, "goal": "Observe", "acceptance": ["UI checked"], "required_checks": ["ui"]})
+            report = root / "observation.txt"
+            report.write_text("Observed success then reset", encoding="utf-8")
+            evidence = {"repo_path": td, "name": "ui", "status": "pass", "evidence": "Observed success then reset",
+                        "evidence_kind": "observation", "evidence_paths": ["observation.txt"]}
+            server.record_verification(evidence)
+            report.write_text("changed evidence", encoding="utf-8")
+            self.assertFalse(server.task_finish({"repo_path": td})["finished"])
+            server.record_verification(evidence)
+            server.record_verification({"repo_path": td, "name": "extra-check", "status": "fail", "evidence": "Observed additional failure"})
+            self.assertFalse(server.task_finish({"repo_path": td})["finished"])
 
 
 if __name__ == "__main__":

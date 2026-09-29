@@ -14,13 +14,14 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 import semantic_index
 import context_budget
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 MAX_FILES = 4000
 MAX_MATCHES = 50
 MAX_AREAS = 40
@@ -211,6 +212,70 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _contained_file(root: Path, relative: str) -> Path:
+    path = (root / relative).resolve(strict=True)
+    if not path.is_relative_to(root) or not path.is_file():
+        raise ValueError("Evidence and artifacts must be files inside the repository")
+    return path
+
+
+def _source_fingerprint(root: Path, excluded: list[str] | None = None) -> str:
+    """Hash current inputs, including staged edits and new source files, not just HEAD."""
+    tracked = set(_git(root, "ls-files", "-z").split("\0"))
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    paths = tracked | {p for p in untracked if Path(p).suffix.lower() in SOURCE_SUFFIXES}
+    ignored = set(excluded or [])
+    digest = hashlib.sha256(_git(root, "rev-parse", "HEAD").strip().encode())
+    for relative in sorted(paths - {""} - ignored):
+        if any(part in SKIP_PARTS for part in Path(relative).parts):
+            continue
+        path = root / relative
+        digest.update(relative.encode("utf-8") + b"\0")
+        if path.is_symlink():
+            digest.update(os.readlink(path).encode("utf-8"))
+        elif path.is_file():
+            digest.update(_sha256_file(path).encode())
+        else:
+            digest.update(b"missing")
+    return digest.hexdigest()
+
+
+def _artifact_snapshot(root: Path, pattern: str) -> dict[str, dict[str, Any]]:
+    if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+        raise ValueError("artifact_glob must stay inside the repository")
+    found = {}
+    for candidate in root.glob(pattern):
+        if not candidate.is_file():
+            continue
+        relative = candidate.relative_to(root).as_posix()
+        path = _contained_file(root, relative)
+        stat = path.stat()
+        if stat.st_size <= 0:
+            continue
+        if len(found) >= 100:
+            raise ValueError("artifact_glob matches too many files; use a narrower pattern")
+        found[relative] = {
+            "path": relative, "size": stat.st_size, "mtime": stat.st_mtime,
+            "mtime_ns": stat.st_mtime_ns, "sha256": _sha256_file(path),
+        }
+    return found
+
+
+def _check_freshness(root: Path, check: dict[str, Any]) -> str | None:
+    if check.get("evidence_kind") not in {"command", "observation", "build"}:
+        return "Evidence predates verifiable records; record it again"
+    if check.get("source_fingerprint") != _source_fingerprint(root, check.get("input_exclusions")):
+        return "Repository inputs changed after verification"
+    for item in check.get("evidence_files", []):
+        try:
+            path = _contained_file(root, item["path"])
+            if _sha256_file(path) != item["sha256"]:
+                return f"Evidence file changed: {item['path']}"
+        except (OSError, ValueError, KeyError):
+            return "Evidence file is missing or outside the repository"
+    return None
 
 
 def repo_overview(args: dict[str, Any]) -> dict[str, Any]:
@@ -432,10 +497,10 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("goal is required")
-    if not isinstance(acceptance, list) or any(not isinstance(x, str) for x in acceptance):
-        raise ValueError("acceptance must be a list of strings")
-    if not isinstance(required, list) or any(not isinstance(x, str) or not x.strip() for x in required):
-        raise ValueError("required_checks must be a list of non-empty strings")
+    if not isinstance(acceptance, list) or not acceptance or any(not isinstance(x, str) or not x.strip() for x in acceptance):
+        raise ValueError("acceptance must contain at least one non-empty criterion")
+    if not isinstance(required, list) or not required or any(not isinstance(x, str) or not x.strip() for x in required):
+        raise ValueError("required_checks must contain at least one non-empty check")
     if len(required) > 12:
         raise ValueError("At most 12 required checks are allowed")
 
@@ -449,14 +514,15 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
     task = {
         "id": task_id,
         "goal": goal.strip(),
-        "acceptance": acceptance[:20],
-        "required_checks": list(dict.fromkeys(required)),
+        "acceptance": [x.strip() for x in acceptance[:20]],
+        "required_checks": list(dict.fromkeys(x.strip() for x in required)),
         "checks": {},
         "started_at": time.time(),
         "status": "active",
         "deliverables": [],
         "commands": 0,
         "output_chars": 0,
+        "command_records": {},
         "context_budget": context_budget.init_budget(
             args.get("max_context_chars"),
             args.get("max_context_calls"),
@@ -635,7 +701,19 @@ def run_bounded_command(args: dict[str, Any]) -> dict[str, Any]:
     if task.get("status") != "active":
         raise ValueError("Task is not active; begin a new task before running commands")
 
+    before = _source_fingerprint(root)
     result = _run_process(root, argv, timeout)
+    after = _source_fingerprint(root)
+    command_id = uuid.uuid4().hex
+    result["command_id"] = command_id
+    records = task.setdefault("command_records", {})
+    records[command_id] = {
+        "argv": argv, "returncode": result["returncode"], "timed_out": result["timed_out"],
+        "source_fingerprint": after, "inputs_unchanged": before == after,
+        "output_sha256": hashlib.sha256(result["output"].encode("utf-8")).hexdigest(),
+        "recorded_at": time.time(),
+    }
+    task["command_records"] = dict(list(records.items())[-30:])
     task["commands"] = int(task.get("commands", 0)) + 1
     task["output_chars"] = int(task.get("output_chars", 0)) + len(result["output"])
     state["task"] = task
@@ -665,30 +743,37 @@ def build_artifact(args: dict[str, Any]) -> dict[str, Any]:
     if task.get("status") != "active":
         raise ValueError("Task is not active")
 
-    started = time.time()
+    before_artifacts = _artifact_snapshot(root, pattern)
+    before_inputs = _source_fingerprint(root, list(before_artifacts))
     result = _run_process(root, argv, timeout)
+    after_artifacts = _artifact_snapshot(root, pattern)
+    exclusions = sorted(set(before_artifacts) | set(after_artifacts))
+    after_inputs = _source_fingerprint(root, exclusions)
+    signature = hashlib.sha256(json.dumps({"argv": argv, "glob": pattern,
+                                          "inputs": after_inputs}, sort_keys=True).encode()).hexdigest()
+    previous = state.get("build_records", {}).get(signature, {})
     artifacts: list[dict[str, Any]] = []
-    for candidate in root.glob(pattern):
-        try:
-            if not candidate.is_file():
-                continue
-            stat = candidate.stat()
-            if stat.st_size <= 0:
-                continue
-            artifacts.append({
-                "path": str(candidate.relative_to(root)),
-                "size": stat.st_size,
-                "mtime": stat.st_mtime,
-                "fresh_for_task": stat.st_mtime >= started - 2,
-                "sha256": _sha256_file(candidate),
-            })
-        except OSError:
-            continue
+    rejected = []
+    for relative, item in after_artifacts.items():
+        old = before_artifacts.get(relative)
+        changed = old is None or any(old[k] != item[k] for k in ("sha256", "size", "mtime_ns"))
+        reuse = previous.get(relative) == item["sha256"]
+        if changed or reuse:
+            artifacts.append({**item, "fresh_for_task": changed,
+                              "provenance": "produced_by_command" if changed else "verified_reuse"})
+        else:
+            rejected.append({"path": relative, "reason": "Unchanged artifact has no matching successful build record"})
     artifacts.sort(key=lambda x: x["mtime"], reverse=True)
 
-    passed = result["returncode"] == 0 and bool(artifacts)
+    passed = (result["returncode"] == 0 and not result["timed_out"]
+              and bool(artifacts) and before_inputs == after_inputs)
     evidence = {
         "status": "pass" if passed else "fail",
+        "evidence_kind": "build",
+        "source_fingerprint": after_inputs,
+        "input_exclusions": exclusions,
+        "evidence_files": [{"path": a["path"], "sha256": a["sha256"]} for a in artifacts],
+        "verified_by": "sentinel_build",
         "evidence": (
             f"command exit={result['returncode']}; artifacts="
             + ", ".join(a["path"] for a in artifacts[:10])
@@ -696,11 +781,13 @@ def build_artifact(args: dict[str, Any]) -> dict[str, Any]:
         "recorded_at": time.time(),
     }
     task.setdefault("checks", {})[check_name] = evidence
-    if artifacts:
-        known = {x.get("path") for x in task.setdefault("deliverables", []) if isinstance(x, dict)}
-        for item in artifacts[:10]:
-            if item["path"] not in known:
-                task["deliverables"].append(item)
+    if passed:
+        records = state.setdefault("build_records", {})
+        records[signature] = {a["path"]: a["sha256"] for a in artifacts}
+        state["build_records"] = dict(list(records.items())[-20:])
+        known = {x["path"]: x for x in task.setdefault("deliverables", [])}
+        known.update({a["path"]: a for a in artifacts[:10]})
+        task["deliverables"] = list(known.values())
     task["commands"] = int(task.get("commands", 0)) + 1
     task["output_chars"] = int(task.get("output_chars", 0)) + len(result["output"])
     state["task"] = task
@@ -709,9 +796,11 @@ def build_artifact(args: dict[str, Any]) -> dict[str, Any]:
     return {
         **result,
         "artifacts": artifacts[:10],
+        "rejected_artifacts": rejected[:10],
+        "inputs_unchanged": before_inputs == after_inputs,
         "check": evidence,
         "stop_recommendation": (
-            "BUILD_COMPLETE: artifact exists and command succeeded. Do not poll Gradle/build processes further."
+            "BUILD_COMPLETE: successful command produced or verifiably reused the artifact for unchanged inputs."
             if passed else
             "Build or artifact verification failed; inspect the bounded output before retrying."
         ),
@@ -800,9 +889,42 @@ def record_verification(args: dict[str, Any]) -> dict[str, Any]:
     state, task = _current_task(root)
     if task.get("status") != "active":
         raise ValueError("Task is not active; verification evidence is immutable after completion")
+    name = name.strip()
+    kind = args.get("evidence_kind")
+    details: dict[str, Any] = {}
+    if status == "pass":
+        if kind == "command":
+            command_id = args.get("command_id")
+            record = task.get("command_records", {}).get(command_id)
+            if not record or record["returncode"] != 0 or record["timed_out"] or not record["inputs_unchanged"]:
+                raise ValueError("Passing command evidence requires a successful Sentinel command_id with unchanged inputs")
+            if record["source_fingerprint"] != _source_fingerprint(root):
+                raise ValueError("Repository inputs changed after the command; rerun the verification")
+            details = {"command_id": command_id, "verified_by": "sentinel_process",
+                       "source_fingerprint": record["source_fingerprint"], "command": record}
+        elif kind == "observation":
+            paths = args.get("evidence_paths")
+            if not isinstance(paths, list) or not paths or len(paths) > 10 or any(not isinstance(p, str) for p in paths):
+                raise ValueError("Observation evidence requires 1-10 repository-relative evidence_paths")
+            files = []
+            for relative in paths:
+                path = _contained_file(root, relative)
+                if path.stat().st_size == 0:
+                    raise ValueError("Evidence files must not be empty")
+                files.append({"path": path.relative_to(root).as_posix(), "sha256": _sha256_file(path)})
+            details = {"verified_by": "reported_observation", "evidence_files": files,
+                       "source_fingerprint": _source_fingerprint(root),
+                       "limitation": "Sentinel verifies file existence and integrity, not the truth of the observation"}
+        else:
+            raise ValueError("Passing evidence requires evidence_kind command or observation; text alone cannot pass")
+    existing = task.get("checks", {}).get(name, {})
+    if existing.get("evidence_kind") == "build" and status == "pass":
+        raise ValueError("Build checks must be updated by build_artifact")
     task.setdefault("checks", {})[name] = {
         "status": status,
         "evidence": evidence[:4000],
+        "evidence_kind": kind,
+        **details,
         "recorded_at": time.time(),
     }
     state["task"] = task
@@ -820,12 +942,20 @@ def task_finish(args: dict[str, Any]) -> dict[str, Any]:
 
     required = task.get("required_checks", [])
     checks = task.get("checks", {})
+    if not required or not task.get("acceptance") or any(not isinstance(x, str) or not x.strip() for x in required):
+        return {"finished": False, "reason": "EMPTY_VERIFICATION_PLAN",
+                "guidance": "Begin a task with observable acceptance criteria and at least one required check"}
     missing = [name for name in required if checks.get(name, {}).get("status") != "pass"]
+    missing += [name for name, check in checks.items() if check.get("status") == "fail" and name not in missing]
+    stale = {name: reason for name, check in checks.items() if check.get("status") == "pass"
+             and (reason := _check_freshness(root, check))}
+    missing += [name for name in stale if name not in missing]
     if missing:
         return {
             "finished": False,
             "reason": "REQUIRED_VERIFICATION_INCOMPLETE",
             "missing_or_failed": missing,
+            "stale_evidence": stale,
             "checks": checks,
             "guidance": (
                 "Do not claim full completion. Verify these checks or report them explicitly as unverified."
@@ -912,8 +1042,8 @@ def _schema_for(name: str) -> dict[str, Any]:
     elif name == "task_begin":
         properties.update({
             "goal": {"type": "string"},
-            "acceptance": {"type": "array", "items": {"type": "string"}},
-            "required_checks": {"type": "array", "items": {"type": "string"}},
+            "acceptance": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "required_checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
             "max_context_chars": {"type": "integer", "minimum": 20000, "maximum": 500000},
             "max_context_calls": {"type": "integer", "minimum": 5, "maximum": 80},
         })
@@ -954,6 +1084,9 @@ def _schema_for(name: str) -> dict[str, Any]:
             "name": {"type": "string"},
             "status": {"type": "string", "enum": ["pass", "fail", "unverified"]},
             "evidence": {"type": "string"},
+            "evidence_kind": {"type": "string", "enum": ["command", "observation"]},
+            "command_id": {"type": "string"},
+            "evidence_paths": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string"}},
         })
         required += ["name", "status", "evidence"]
 
@@ -970,8 +1103,8 @@ def _send(payload: dict[str, Any]) -> None:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if "\n" in data or "\r" in data:
         raise ValueError("Serialized MCP message must not contain embedded newlines")
-    sys.stdout.write(data + "\n")
-    sys.stdout.flush()
+    sys.stdout.buffer.write((data + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
 
 
 def _receive() -> dict[str, Any] | None:
