@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,16 @@ class ServerTests(unittest.TestCase):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {tool["name"] for tool in response["result"]["tools"]}
         self.assertEqual(names, {"repo_overview", "repo_search", "repo_changes"})
+
+    def test_stdio_transport(self):
+        request = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "initialize",
+                              "params": {"protocolVersion": "2025-06-18"}}).encode()
+        frame = b"Content-Length: " + str(len(request)).encode() + b"\r\n\r\n" + request
+        result = subprocess.run([sys.executable, str(HERE / "server.py")], input=frame,
+                                capture_output=True, timeout=5, check=True)
+        header, body = result.stdout.split(b"\r\n\r\n", 1)
+        self.assertIn(b"Content-Length:", header)
+        self.assertEqual(json.loads(body)["result"]["serverInfo"]["name"], "repo-context-verifier")
 
 
 if __name__ == "__main__":
