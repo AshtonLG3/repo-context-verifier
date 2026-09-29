@@ -1,21 +1,21 @@
 {
   "name": "repo-context-verifier",
-  "version": "0.3.0",
-  "description": "Local Codex control bridge with persistent semantic repo memory, process governance, artifact-aware stopping, and evidence-based completion.",
+  "version": "1.0.0",
+  "description": "Local Codex control bridge with persistent semantic repo memory, adaptive context budgets, process governance, artifact-aware stopping, and evidence-based completion.",
   "author": {
     "name": "AshtonLG3"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Repo Context Verifier",
-    "shortDescription": "Semantic repo memory plus build and verification governance",
-    "longDescription": "Local MCP bridge that persistently indexes repository symbols and references, bounds context and command output, recognizes completed build artifacts, limits asynchronous deployment polling, and refuses full completion until required evidence is recorded.",
+    "shortDescription": "Semantic memory, context budget and stop controller",
+    "longDescription": "Local MCP bridge that persistently indexes repository structure, ranks compact context, suppresses duplicate context, governs builds and deployment polling, verifies artifacts, and blocks completion until required evidence is recorded.",
     "developerName": "AshtonLG3",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
     ],
-    "defaultPrompt": "Use Repo Context Verifier to govern this repository task from bounded orientation through direct verification, then stop when the required deliverables are complete."
+    "defaultPrompt": "Use Sentinel to begin a governed repository task, select compact semantic context, implement and verify the change, then stop when task_finish succeeds."
   },
   "mcpServers": "./.mcp.json"
 }
