@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2
+
+- Purge stale semantic rows when indexed files are deleted or become unreadable
+- Include non-ignored untracked source files in semantic refreshes
+- Prevent a new task from silently replacing an active task
+- Negotiate only explicitly supported handshake-era MCP versions and counter-offer 2025-11-25 for unknown/modern initialize requests
+- Clarify that the command allowlist is a process governor, not an OS sandbox
+- Add regression tests for deletion, untracked indexing, active-task replacement, and protocol negotiation
+
+
 ## 1.0.1
 
 - Fixed stdio transport to use newline-delimited UTF-8 JSON-RPC as required by MCP instead of `Content-Length` framing
