@@ -8,7 +8,7 @@ description: Govern Codex repository changes with bounded context, process limit
 1. Confirm the canonical checkout and branch. Do not operate on an accidental duplicate checkout.
 2. Translate the user's request into observable acceptance criteria. Include success, failure, reset and repeat behaviour when those paths matter.
 3. Start with `task_begin`. Required checks must represent what must actually be established before claiming completion.
-4. Use `repo_overview` at most once when orientation is needed. Prefer `repo_search` and `symbol_context` to broad file reads. The symbol tool is heuristic, so inspect real source before claiming dependency coverage.
+4. Check `semantic_status`. If the index is missing or stale, call `semantic_refresh` once. Prefer `semantic_find`, `dependency_context`, and `change_impact` to repeated repo rescans. Fall back to `repo_search`/`symbol_context` when necessary. All graph results are heuristic, so inspect real source before claiming dependency coverage.
 5. Implement the smallest complete change. Use `repo_changes` to detect unrelated edits.
 6. Prefer `run_bounded_command` over open-ended process waiting.
 7. When a build must produce an artifact, use `build_artifact`. If it returns `BUILD_COMPLETE`, the artifact exists and the build command succeeded. Do not continue polling Gradle, npm, or another build process merely to watch it.

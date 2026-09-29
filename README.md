@@ -1,17 +1,17 @@
 # Repo Context Verifier — Sentinel Control Bridge
 
-Version **0.2.0** is a from-scratch rebuild of the original proof of concept.
+Version **0.3.0** adds persistent semantic repository memory to the v0.2 control bridge.
 
 It is a local-first MCP control bridge for Codex repository work. The goal is not to replace a strong reasoning model. It is to stop that model wasting time and context on repeated repository orientation, unbounded command output, unnecessary Gradle/build waiting, and repeated polling of asynchronous deployments.
 
 ## What changed
 
-The original v0.1 server exposed only three read-only repository tools. v0.2 keeps bounded repository orientation, but adds task governance and hard stopping rules:
+v0.3 keeps the v0.2 task/process governor and adds a persistent local SQLite semantic index so Codex can reuse structural knowledge across sessions:
 
 - `repo_overview` — bounded repository map, branch and HEAD
 - `repo_search` — capped literal search across tracked source files
 - `symbol_context` — heuristic symbol definitions and bounded references
-- `repo_changes` — changed/untracked file list
+- `repo_changes` — changed/untracked file list\n- `semantic_refresh` / `semantic_status` — incrementally maintain and inspect the persistent local index\n- `semantic_find` — query indexed definitions and references without rescanning the repo\n- `dependency_context` — return candidate consumers, definitions, imports and related files for a symbol\n- `change_impact` — estimate likely affected files from symbols defined in changed paths
 - `task_begin` / `task_status` — persistent task state and acceptance criteria
 - `run_bounded_command` — hard timeout and capped command output
 - `build_artifact` — bounded build plus artifact verification
@@ -75,7 +75,7 @@ For UI/runtime changes, acceptance criteria should cover relevant success, failu
 
 ## Limits
 
-`symbol_context` is a heuristic textual index, not a full language-aware AST/call graph. A later release can add a persistent semantic graph or bridge to Graphify/Graft/CodeGraph after separate privacy and effectiveness testing.
+The semantic index is persistent and incremental, but it remains heuristic rather than a compiler-grade call graph. Dynamic dispatch, reflection, generated code and framework wiring may be missed. A later release can optionally bridge to Graphify/Graft/CodeGraph after separate privacy and effectiveness testing.
 
 Sentinel also cannot read the private ChatGPT weekly quota counter. It controls measurable proxies instead: tool calls, command duration, output volume, artifact completion and deployment polling.
 
@@ -85,4 +85,4 @@ Sentinel also cannot read the private ChatGPT weekly quota counter. It controls 
 python -m unittest -v
 ```
 
-The test suite covers bounded repo context, required verification, artifact-aware stopping, external polling limits, tool discovery and stdio initialization.
+The test suite covers bounded repo context, persistent semantic indexing and impact analysis, required verification, artifact-aware stopping, external polling limits, tool discovery and stdio initialization.
