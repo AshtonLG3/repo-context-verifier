@@ -113,10 +113,43 @@ class ServerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server._classify_command(["powershell", "-Command", "Get-ChildItem"])
 
+    def test_persistent_semantic_index_and_impact(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "service.py").write_text(
+                "def clock_user():\n    return True\n", encoding="utf-8"
+            )
+            (root / "screen.py").write_text(
+                "from service import clock_user\n\ndef tap():\n    return clock_user()\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "-C", str(root), "add", "service.py", "screen.py"], check=True)
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.com", "commit", "-qm", "initial"
+            ], check=True)
+
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                refreshed = server.semantic_refresh({"repo_path": str(root)})
+                self.assertEqual(refreshed["totals"]["files"], 2)
+                found = server.semantic_find({"repo_path": str(root), "query": "clock_user"})
+                self.assertTrue(any(x["path"] == "service.py" for x in found["definitions"]))
+                context = server.dependency_context({"repo_path": str(root), "symbol": "clock_user"})
+                self.assertIn("screen.py", context["candidate_files"])
+                impact = server.change_impact({"repo_path": str(root), "paths": ["service.py"]})
+                self.assertTrue(any(x["path"] == "screen.py" for x in impact["candidate_affected_files"]))
+                status = server.semantic_status({"repo_path": str(root)})
+                self.assertTrue(status["indexed"])
+                self.assertFalse(status["stale"])
+            finally:
+                server.CACHE_ROOT = old
+
     def test_mcp_lists_control_tools(self):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in response["result"]["tools"]}
-        self.assertTrue({"build_artifact", "external_status", "task_finish", "symbol_context"} <= names)
+        self.assertTrue({"build_artifact", "external_status", "task_finish", "symbol_context", "semantic_refresh", "semantic_find", "dependency_context", "change_impact"} <= names)
 
     def test_stdio_initialization(self):
         request = json.dumps({
@@ -131,7 +164,7 @@ class ServerTests(unittest.TestCase):
         header, body = result.stdout.split(b"\r\n\r\n", 1)
         self.assertIn(b"Content-Length:", header)
         payload = json.loads(body)
-        self.assertEqual(payload["result"]["serverInfo"]["version"], "0.2.0")
+        self.assertEqual(payload["result"]["serverInfo"]["version"], "0.3.0")
         self.assertIn("stop running tools", payload["result"]["instructions"])
 
 
