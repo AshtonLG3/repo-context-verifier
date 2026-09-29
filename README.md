@@ -1,6 +1,6 @@
 # Repo Context Verifier — Sentinel MCP
 
-**Version 1.0.1**
+**Version 1.0.2**
 
 Sentinel is a local-first MCP control bridge for Codex repository work. It is designed for a specific failure mode: the strongest coding model can still waste expensive context rediscovering a repository, keep waiting after an APK is already built, repeatedly poll an asynchronous deployment, or declare success from green tests while a user-visible defect remains.
 
@@ -20,7 +20,7 @@ It incrementally stores:
 - symbol reference sites
 - repository HEAD metadata
 
-The index is reused across sessions. Unchanged files are not reparsed.
+The index is reused across sessions. Unchanged files are not reparsed. Non-ignored untracked source files are included so newly created Codex files participate before `git add`, and deleted files are purged from semantic rows during refresh.
 
 Core tools:
 
@@ -75,7 +75,7 @@ Tools:
 
 ### Verification and completion gate
 
-A task begins with observable acceptance criteria and required evidence:
+A task begins with observable acceptance criteria and required evidence. A second task cannot silently replace an active task; the current task must be completed first:
 
 - `task_begin`
 - `record_verification`
@@ -165,6 +165,7 @@ Sentinel deliberately does **not** claim that:
 - static evidence proves user-visible runtime behaviour
 - it can discover every dependency created through reflection, generated code, dynamic dispatch, dependency injection or framework magic
 - installing Sentinel guarantees a particular percentage of quota savings
+- the command allowlist is an OS security sandbox
 
 Those claims should be measured empirically on comparable tasks.
 
@@ -197,3 +198,8 @@ The suite covers:
 ## Design principle
 
 **Keep the strongest model where its reasoning matters. Spend less of its turn rediscovering, waiting and re-reading.**
+
+
+## MCP protocol compatibility
+
+Sentinel v1.0.2 implements the handshake-era MCP stdio lifecycle and explicitly supports `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`. During `initialize`, a supported client offer is accepted; an unknown or modern-era version is counter-offered as `2025-11-25`. Sentinel does not currently implement the sessionless `2026-07-28` `server/discover` lifecycle.
