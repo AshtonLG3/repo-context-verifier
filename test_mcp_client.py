@@ -24,7 +24,7 @@ class OfficialMcpClientTests(unittest.IsolatedAsyncioTestCase):
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 initialized = await session.initialize()
-                self.assertEqual(initialized.serverInfo.name, "repo-context-verifier")
+                self.assertEqual(initialized.server_info.name, "repo-context-verifier")
 
                 listed = await session.list_tools()
                 names = {tool.name for tool in listed.tools}
