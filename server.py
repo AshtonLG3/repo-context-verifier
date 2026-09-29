@@ -20,13 +20,20 @@ from typing import Any
 import semantic_index
 import context_budget
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 MAX_FILES = 4000
 MAX_MATCHES = 50
 MAX_AREAS = 40
 MAX_OUTPUT_CHARS = 20_000
 MAX_COMMAND_SECONDS = 900
 MAX_STATUS_CHECKS = 2
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
+LATEST_HANDSHAKE_PROTOCOL = SUPPORTED_PROTOCOL_VERSIONS[0]
 
 SOURCE_SUFFIXES = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".kts", ".go", ".rs",
@@ -79,7 +86,11 @@ def _resolve_root(value: str | None) -> Path:
 
 
 def _tracked_files(root: Path) -> list[str]:
-    listed = _git(root, "ls-files", "-z").split("\0")
+    # Include tracked plus non-ignored untracked source files. This matters while
+    # Codex is creating new files before they have been git-added.
+    listed = _git(
+        root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
+    ).split("\0")
     result: list[str] = []
     for path in listed:
         if not path:
@@ -442,6 +453,11 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
     state = _load_state(root)
     previous = state.get("task")
     if isinstance(previous, dict):
+        if previous.get("status") == "active":
+            raise ValueError(
+                "An active task already exists. Finish it with task_finish before starting "
+                "another task; active verification state cannot be replaced implicitly."
+            )
         state.setdefault("history", []).append(previous)
         state["history"] = state["history"][-10:]
 
@@ -1035,9 +1051,14 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     ident = request.get("id")
 
     if method == "initialize":
-        requested = request.get("params", {}).get("protocolVersion", "2025-06-18")
+        requested = request.get("params", {}).get("protocolVersion")
+        negotiated = (
+            requested
+            if requested in SUPPORTED_PROTOCOL_VERSIONS
+            else LATEST_HANDSHAKE_PROTOCOL
+        )
         result = {
-            "protocolVersion": requested,
+            "protocolVersion": negotiated,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "repo-context-verifier", "version": VERSION},
             "instructions": (
