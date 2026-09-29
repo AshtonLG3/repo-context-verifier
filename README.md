@@ -1,88 +1,199 @@
-# Repo Context Verifier — Sentinel Control Bridge
+# Repo Context Verifier — Sentinel MCP
 
-Version **0.3.0** adds persistent semantic repository memory to the v0.2 control bridge.
+**Version 1.0.0**
 
-It is a local-first MCP control bridge for Codex repository work. The goal is not to replace a strong reasoning model. It is to stop that model wasting time and context on repeated repository orientation, unbounded command output, unnecessary Gradle/build waiting, and repeated polling of asynchronous deployments.
+Sentinel is a local-first MCP control bridge for Codex repository work. It is designed for a specific failure mode: the strongest coding model can still waste expensive context rediscovering a repository, keep waiting after an APK is already built, repeatedly poll an asynchronous deployment, or declare success from green tests while a user-visible defect remains.
 
-## What changed
+Sentinel does not replace the reasoning model. It governs the work around it.
 
-v0.3 keeps the v0.2 task/process governor and adds a persistent local SQLite semantic index so Codex can reuse structural knowledge across sessions:
+## What Sentinel controls
 
-- `repo_overview` — bounded repository map, branch and HEAD
-- `repo_search` — capped literal search across tracked source files
-- `symbol_context` — heuristic symbol definitions and bounded references
-- `repo_changes` — changed/untracked file list\n- `semantic_refresh` / `semantic_status` — incrementally maintain and inspect the persistent local index\n- `semantic_find` — query indexed definitions and references without rescanning the repo\n- `dependency_context` — return candidate consumers, definitions, imports and related files for a symbol\n- `change_impact` — estimate likely affected files from symbols defined in changed paths
-- `task_begin` / `task_status` — persistent task state and acceptance criteria
-- `run_bounded_command` — hard timeout and capped command output
-- `build_artifact` — bounded build plus artifact verification
-- `artifact_status` — check an artifact without rerunning a build
-- `external_status` — deployment/status checks limited to two per task key
-- `record_verification` — store pass/fail/unverified evidence
-- `task_finish` — refuses completion while required verification is incomplete
+### Persistent repository intelligence
 
-Task state is stored outside the repository under `~/.repo-context-verifier/` by default. Set `SENTINEL_HOME` to override it.
+Sentinel maintains a local SQLite semantic index under `~/.repo-context-verifier/` (or `SENTINEL_HOME`).
 
-## Why this exists
+It incrementally stores:
 
-A build can already be useful while the agent keeps waiting on Gradle. A Railway deploy can already be triggered while the agent keeps polling it. A test suite can be green while a visible UI defect still exists.
+- source files and content digests
+- likely symbol definitions
+- import relationships
+- symbol reference sites
+- repository HEAD metadata
 
-Sentinel separates those concerns:
+The index is reused across sessions. Unchanged files are not reparsed.
 
-1. **Orient narrowly.** Return paths and evidence instead of dumping the repository.
-2. **Run processes with bounds.** Commands have timeouts and output caps.
-3. **Recognize deliverables.** A successful build plus a real APK/artifact is a stop condition.
-4. **Bound asynchronous polling.** External status checks have a hard per-task ceiling.
-5. **Require evidence.** `task_finish` cannot succeed until required checks are recorded as passing.
-6. **Stop when complete.** A successful finish explicitly tells the agent not to keep running commands.
+Core tools:
 
-## Install
+- `semantic_refresh` — incrementally refresh persistent repo memory
+- `semantic_status` — report index state and detect HEAD/worktree staleness
+- `semantic_find` — query definitions and reference sites
+- `dependency_context` — return candidate consumers, imports and related files
+- `change_impact` — estimate likely blast-radius files from changed definitions
+- `context_bundle` — rank a compact first-pass set of relevant files for a task
+
+`context_bundle` is the preferred orientation tool. It can refresh stale semantic memory automatically and ranks files using changed-file, path, definition, reference and import signals.
+
+### Adaptive context budgeting
+
+Each governed task receives a local context budget. By default Sentinel allows:
+
+- 120,000 returned context characters
+- 24 context-producing tool calls
+
+These are **not ChatGPT/Codex token or weekly quota measurements**. They are measurable local proxies for the amount of repository context Sentinel itself feeds back to the model.
+
+Sentinel:
+
+- tracks context calls and returned characters
+- suppresses an exact duplicate context request while the worktree generation is unchanged
+- reports pressure as `ok`, `warning` or `critical`
+- blocks new context calls once the configured budget is exhausted
+- permits at most two explicit budget extensions, each requiring a concrete reason
+
+Tools:
+
+- `context_budget_status`
+- `context_budget_extend`
+- `task_report`
+
+This lets a high-reasoning model remain the brain while avoiding repeated repo discovery.
+
+### Process governor
+
+Sentinel is not a generic shell. Governed process tools use an allowlist, `shell=False`, hard timeouts and capped output.
+
+Tools:
+
+- `run_bounded_command`
+- `build_artifact`
+- `artifact_status`
+- `external_status`
+
+`build_artifact` runs a bounded build, verifies the expected artifact exists, records its size and SHA-256, and returns `BUILD_COMPLETE` when the build command succeeded. At that point the agent is instructed not to keep babysitting Gradle or another build process.
+
+`external_status` is intentionally limited to two checks per task key. It is meant for asynchronous systems such as Railway where repeated polling can consume time and agent context without improving the code change.
+
+### Verification and completion gate
+
+A task begins with observable acceptance criteria and required evidence:
+
+- `task_begin`
+- `record_verification`
+- `task_finish`
+
+A green unit test is evidence that the test passed; it is not automatically evidence that the UI behaved correctly. Sentinel keeps those evidence levels distinct.
+
+For user-facing work, verification can cover:
+
+- success path
+- failure path
+- reset path
+- repeat action
+- browser/runtime observation
+- physical-device observation
+- artifact build
+- production/deployment state
+
+`task_finish` refuses full completion while any required check lacks passing evidence.
+
+After `task_finish` succeeds, the stop controller blocks further governed repository-context work and external polling for that task. New work should start a new task.
+
+## Recommended Codex workflow
+
+1. Call `task_begin` with the exact observable acceptance criteria and only the checks that must truly pass.
+2. Call `context_bundle` with the task in plain language.
+3. Use `semantic_find`, `dependency_context`, or `change_impact` only for focused follow-up.
+4. Fall back to `repo_search` or `symbol_context` when semantic evidence is insufficient.
+5. Implement the smallest complete change.
+6. Use `repo_changes` to catch unrelated edits.
+7. Run bounded tests/builds.
+8. If an APK/package/binary is required, use `build_artifact` and stop build polling after `BUILD_COMPLETE`.
+9. Use `external_status` sparingly for asynchronous deployment status.
+10. Record direct evidence with `record_verification`.
+11. Call `task_finish`.
+12. Use `task_report` for the final compact verification/process/context summary.
+
+## Installation
 
 Requirements:
 
 - Python 3.10+
 - Git on `PATH`
-- A Codex/MCP client that can launch a local stdio server
+- Codex or another MCP client that can launch a local stdio server
 
-The repository includes portable MCP manifests. The server itself has no third-party Python dependencies.
+The server uses only the Python standard library.
 
-## Recommended workflow
+Portable MCP configuration:
 
-For implementation work:
+```json
+{
+  "mcpServers": {
+    "repo-context-verifier": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/repo-context-verifier/server.py"]
+    }
+  }
+}
+```
 
-1. Call `task_begin` with concrete observable acceptance criteria and the checks that must pass.
-2. Use `repo_overview` once only if the repository is unfamiliar.
-3. Use `repo_search` or `symbol_context` before opening broad files.
-4. Make the smallest complete change.
-5. Use `build_artifact` when the task expects an APK/package/binary. If it returns `BUILD_COMPLETE`, do not keep polling the build.
-6. Use `external_status` only when an asynchronous service needs a status read. It allows at most two checks per task key.
-7. Record direct evidence with `record_verification`.
-8. Call `task_finish`. If it refuses, report the missing verification instead of claiming success.
+The repository also includes Codex plugin manifests.
 
-## Verification philosophy
+## Local data and privacy
 
-A green test proves the test passed. It does not automatically prove the user-visible behaviour is correct.
+Sentinel keeps its own state outside the target repository by default:
 
-For UI/runtime changes, acceptance criteria should cover relevant success, failure, reset and repeat paths. Where direct device/browser verification is unavailable, record that state as `unverified` rather than upgrading indirect evidence into certainty.
+```text
+~/.repo-context-verifier/
+  tasks/
+  semantic/
+```
 
-## Security and privacy
+Set `SENTINEL_HOME` to move the cache.
 
-- Source inspection is local.
-- Secret-like filenames and common generated directories are skipped by repo context tools.
-- Command execution uses argv arrays with `shell=False`.
-- Command output is capped before being returned to the model.
-- The server does not upload source to a hosted indexing service.
-- Governed command tools intentionally execute only an allowlisted set of build/test/read/status commands. Sentinel is not a general shell.
+Repository orientation skips common generated directories and secret-like filenames. No hosted indexing service is required and Sentinel itself does not upload source code elsewhere.
 
-## Limits
+The MCP client still has whatever access you explicitly give it, and governed build/status tools execute allowlisted local commands. Treat installation of any MCP server with process tools as code-execution access to the selected checkout.
 
-The semantic index is persistent and incremental, but it remains heuristic rather than a compiler-grade call graph. Dynamic dispatch, reflection, generated code and framework wiring may be missed. A later release can optionally bridge to Graphify/Graft/CodeGraph after separate privacy and effectiveness testing.
+## What Sentinel does not claim
 
-Sentinel also cannot read the private ChatGPT weekly quota counter. It controls measurable proxies instead: tool calls, command duration, output volume, artifact completion and deployment polling.
+Sentinel deliberately does **not** claim that:
 
-## Test
+- it can read the private ChatGPT/Codex weekly quota counter
+- returned character counts equal tokens or credits
+- its semantic index is a compiler-grade call graph
+- static evidence proves user-visible runtime behaviour
+- it can discover every dependency created through reflection, generated code, dynamic dispatch, dependency injection or framework magic
+- installing Sentinel guarantees a particular percentage of quota savings
+
+Those claims should be measured empirically on comparable tasks.
+
+## Testing
+
+Run locally:
 
 ```bash
 python -m unittest -v
 ```
 
-The test suite covers bounded repo context, persistent semantic indexing and impact analysis, required verification, artifact-aware stopping, external polling limits, tool discovery and stdio initialization.
+GitHub Actions runs the suite on Windows and Ubuntu with Python 3.10 and 3.12.
+
+The suite covers:
+
+- bounded repo context and secret-like filename skipping
+- persistent semantic indexing
+- ranked context selection and impact analysis
+- worktree staleness detection
+- adaptive context accounting
+- duplicate-context suppression
+- explicit budget extension
+- artifact-aware stopping and SHA-256
+- deployment polling limits
+- command allowlisting
+- required verification
+- hard stop after task completion
+- MCP tool discovery and stdio initialization
+
+## Design principle
+
+**Keep the strongest model where its reasoning matters. Spend less of its turn rediscovering, waiting and re-reading.**
