@@ -297,7 +297,7 @@ class ServerTests(unittest.TestCase):
                 for invalid in ([], ["  "]):
                     with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
                         server.task_begin({**base, field: invalid})
-            server._save_state(root, {"task": {"status": "active", "required_checks": [], "acceptance": ["behavior"]}})
+            server._save_state(server._resolve_root(td), {"task": {"status": "active", "required_checks": [], "acceptance": ["behavior"]}})
             self.assertFalse(server.task_finish({"repo_path": td})["finished"])
 
     def test_unrelated_success_cannot_validate_old_artifact(self):
