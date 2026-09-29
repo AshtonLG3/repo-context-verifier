@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.0"
+import semantic_index
+
+VERSION = "0.3.0"
 MAX_FILES = 4000
 MAX_MATCHES = 50
 MAX_AREAS = 40
@@ -232,6 +234,65 @@ def symbol_context(args: dict[str, Any]) -> dict[str, Any]:
         "references": references,
         "note": "Heuristic textual symbol context; verify callers/dependencies in source before claiming full impact coverage.",
     }
+
+
+
+def semantic_refresh(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    return semantic_index.refresh_index(
+        CACHE_ROOT,
+        _repo_key(root),
+        root,
+        _tracked_files(root),
+        _git(root, "rev-parse", "HEAD").strip(),
+    )
+
+
+def semantic_status(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    status = semantic_index.index_status(CACHE_ROOT, _repo_key(root))
+    status["current_head"] = _git(root, "rev-parse", "HEAD").strip()
+    if status.get("indexed"):
+        status["stale"] = status.get("meta", {}).get("head") != status["current_head"]
+    return status
+
+
+def semantic_find(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    return semantic_index.semantic_search(
+        CACHE_ROOT,
+        _repo_key(root),
+        args.get("query", ""),
+        args.get("limit", 30),
+    )
+
+
+def dependency_context(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    return semantic_index.dependency_context(
+        CACHE_ROOT,
+        _repo_key(root),
+        args.get("symbol", ""),
+        args.get("limit", 40),
+    )
+
+
+def change_impact(args: dict[str, Any]) -> dict[str, Any]:
+    root = _resolve_root(args.get("repo_path"))
+    changed = args.get("paths")
+    if changed is None:
+        base = args.get("base", "HEAD")
+        changed = _git(root, "diff", "--name-only", base, "--").splitlines()
+        changed += _git(root, "ls-files", "--others", "--exclude-standard").splitlines()
+        changed = list(dict.fromkeys(changed))[:100]
+    if not isinstance(changed, list) or any(not isinstance(x, str) for x in changed):
+        raise ValueError("paths must be a list of repository-relative strings")
+    return semantic_index.impact_for_paths(
+        CACHE_ROOT,
+        _repo_key(root),
+        changed,
+        args.get("limit", 60),
+    )
 
 
 def repo_changes(args: dict[str, Any]) -> dict[str, Any]:
@@ -605,6 +666,11 @@ TOOLS = {
     "repo_search": (repo_search, "Find bounded literal matches in tracked source files without dumping whole files."),
     "symbol_context": (symbol_context, "Locate likely symbol definitions and bounded references; heuristic, not a full AST graph."),
     "repo_changes": (repo_changes, "List changed and untracked files relative to a Git ref."),
+    "semantic_refresh": (semantic_refresh, "Build or incrementally refresh the persistent local semantic index for this repository."),
+    "semantic_status": (semantic_status, "Show whether the persistent semantic index exists and whether it is stale against HEAD."),
+    "semantic_find": (semantic_find, "Query indexed symbol definitions and reference sites without rescanning the whole repository."),
+    "dependency_context": (dependency_context, "Return candidate definitions, consumers, imports, and files related to an indexed symbol."),
+    "change_impact": (change_impact, "Estimate candidate affected files from symbols defined in changed paths using the persistent index."),
     "task_begin": (task_begin, "Begin a governed task with acceptance criteria and required verification checks."),
     "task_status": (task_status, "Read the current governed task, evidence, deliverables, and polling usage."),
     "run_bounded_command": (run_bounded_command, "Run one allowlisted local build/test/read command with a hard timeout and capped output."),
@@ -629,6 +695,24 @@ def _schema_for(name: str) -> dict[str, Any]:
         required.append("symbol")
     elif name == "repo_changes":
         properties["base"] = {"type": "string", "default": "HEAD"}
+    elif name == "semantic_find":
+        properties.update({
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        })
+        required.append("query")
+    elif name == "dependency_context":
+        properties.update({
+            "symbol": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 60},
+        })
+        required.append("symbol")
+    elif name == "change_impact":
+        properties.update({
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "base": {"type": "string", "default": "HEAD"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 60},
+        })
     elif name == "task_begin":
         properties.update({
             "goal": {"type": "string"},
@@ -712,9 +796,10 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "repo-context-verifier", "version": VERSION},
             "instructions": (
-                "Use bounded repo tools before broad file reads. Start governed implementation work with task_begin. "
-                "Prefer build_artifact over manually waiting on build processes. external_status is limited to two checks "
-                "per task key. Record direct evidence for required checks. If task_finish succeeds, stop running tools."
+                "Prefer the persistent semantic index for orientation: refresh it when stale, then use semantic_find, "
+                "dependency_context, or change_impact before broad file reads. Start governed implementation work with "
+                "task_begin. Prefer build_artifact over manually waiting on build processes. external_status is limited "
+                "to two checks per task key. Record direct evidence for required checks. If task_finish succeeds, stop running tools."
             ),
         }
     elif method == "tools/list":
