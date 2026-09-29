@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "repo-context-verifier",
+  "version": "0.1.0",
+  "description": "Bounded local repository orientation and evidence-based verification for Codex tasks.",
+  "author": {"name": "AshtonLG3"},
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Repo Context Verifier",
+        "shortDescription": "Targeted repo context",
+        "longDescription": "Read-only local MCP tools for bounded repository search, source area summaries, and changed-file lists, plus a workflow for verifying user-visible behavior before completion.",
+        "developerName": "AshtonLG3",
+        "category": "Productivity",
+        "capabilities": ["Interactive"],
+        "defaultPrompt": "Use Repo Context Verifier to inspect this repository and verify the requested behavior."
+      }
+    }
+  }
+}

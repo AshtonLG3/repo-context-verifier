@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "repo-context-verifier": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["${PLUGIN_ROOT}/server.py"],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}
