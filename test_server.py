@@ -241,21 +241,44 @@ class ServerTests(unittest.TestCase):
         names = {t["name"] for t in response["result"]["tools"]}
         self.assertTrue({"build_artifact", "external_status", "task_finish", "symbol_context", "semantic_refresh", "semantic_find", "dependency_context", "change_impact", "context_bundle", "context_budget_status", "context_budget_extend", "task_report"} <= names)
 
-    def test_stdio_initialization(self):
+    def test_stdio_initialization_uses_newline_delimited_jsonrpc(self):
         request = json.dumps({
             "jsonrpc": "2.0", "id": 7, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18"}
-        }).encode()
-        frame = b"Content-Length: " + str(len(request)).encode() + b"\r\n\r\n" + request
+            "params": {"protocolVersion": "2025-11-25"}
+        }).encode() + b"\n"
         result = subprocess.run(
             [sys.executable, str(HERE / "server.py")],
-            input=frame, capture_output=True, timeout=5, check=True
+            input=request, capture_output=True, timeout=5, check=True
         )
-        header, body = result.stdout.split(b"\r\n\r\n", 1)
-        self.assertIn(b"Content-Length:", header)
-        payload = json.loads(body)
-        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.0.0")
+        self.assertNotIn(b"Content-Length:", result.stdout)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.0.1")
         self.assertIn("stop running tools", payload["result"]["instructions"])
+
+    def test_returned_source_context_redacts_common_secret_values(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "config.py").write_text(
+                'api_key = "sk-1234567890ABCDEFGHIJKLMNOP"\n'
+                'password = "super-secret-password"\n'
+                'safe_value = "hello"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(root), "add", "config.py"], check=True)
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.com", "commit", "-qm", "initial"
+            ], check=True)
+
+            key = server.repo_search({"repo_path": str(root), "term": "api_key"})
+            password = server.repo_search({"repo_path": str(root), "term": "password"})
+            self.assertIn("[REDACTED]", key["matches"][0]["text"])
+            self.assertNotIn("1234567890ABCDEFGHIJKLMNOP", key["matches"][0]["text"])
+            self.assertIn("[REDACTED]", password["matches"][0]["text"])
+            self.assertNotIn("super-secret-password", password["matches"][0]["text"])
 
 
 if __name__ == "__main__":
