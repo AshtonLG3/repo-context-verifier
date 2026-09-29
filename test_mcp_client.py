@@ -36,7 +36,7 @@ class OfficialMcpClientTests(unittest.IsolatedAsyncioTestCase):
                     "repo_overview",
                     arguments={"repo_path": str(HERE)},
                 )
-                self.assertFalse(result.isError)
+                self.assertFalse(result.is_error)
                 self.assertTrue(result.content)
 
 
