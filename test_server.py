@@ -207,6 +207,35 @@ class ServerTests(unittest.TestCase):
             finally:
                 server.CACHE_ROOT = old
 
+    def test_stop_controller_blocks_context_after_completion(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            self.make_repo(root)
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                server.task_begin({
+                    "repo_path": str(root),
+                    "goal": "Inspect and finish",
+                    "acceptance": [],
+                    "required_checks": [],
+                })
+                self.assertTrue(server.task_finish({"repo_path": str(root)})["finished"])
+                blocked = server._execute_tool("repo_search", {
+                    "repo_path": str(root),
+                    "term": "toast",
+                })
+                self.assertTrue(blocked["blocked"])
+                self.assertEqual(blocked["reason"], "TASK_ALREADY_COMPLETE")
+                with self.assertRaises(ValueError):
+                    server.external_status({
+                        "repo_path": str(root),
+                        "argv": ["railway", "status"],
+                        "key": "railway",
+                    })
+            finally:
+                server.CACHE_ROOT = old
+
     def test_mcp_lists_control_tools(self):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in response["result"]["tools"]}
