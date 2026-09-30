@@ -164,13 +164,15 @@ def refresh_index(
 
     try:
         for rel in files:
-            live_paths.add(rel)
             full = root / rel
             try:
                 text = full.read_text(encoding="utf-8", errors="replace")
                 stat = full.stat()
             except OSError:
+                # Do not mark unreadable/missing paths live. If they were indexed
+                # previously, the cleanup pass below must remove their stale rows.
                 continue
+            live_paths.add(rel)
             scanned += 1
             digest = _digest(text)
             old = conn.execute("SELECT digest FROM files WHERE path=?", (rel,)).fetchone()

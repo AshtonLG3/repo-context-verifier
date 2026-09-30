@@ -41,7 +41,7 @@ Context-producing tools are measured by returned serialized characters and call 
 
 ### 4. Process governor
 
-Only a narrow allowlist of build/test/read/status commands is accepted by Sentinel process tools. Commands use `shell=False`, timeout bounds and output clipping.
+Only a narrow allowlist of build/test/read/status commands is accepted by Sentinel process tools. Commands use `shell=False`, timeout bounds and output clipping. This constrains Sentinel's own command surface but is not sandboxing: a permitted repository build or test can execute repository-controlled code with the host account's permissions.
 
 ### 5. Verification gate
 
