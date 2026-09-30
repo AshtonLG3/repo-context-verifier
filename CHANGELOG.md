@@ -8,6 +8,17 @@
 - Compare artifacts before and after builds. Unchanged artifacts pass only with a prior successful record for the same command, inputs, and artifact hash.
 - Label reported observations explicitly: file integrity does not prove the observation is true.
 - Add regression tests for old artifacts, cached builds, tampering, stale verification, empty plans, and invented command evidence.
+- Integrate semantic freshness and protocol fixes from 1.0.2; explicitly superseded tasks preserve their failed/unfinished evidence in history.
+
+## 1.0.2
+
+- Purge stale semantic rows when indexed files are deleted or become unreadable
+- Include non-ignored untracked source files in semantic refreshes
+- Prevent a new task from silently replacing an active task
+- Negotiate only explicitly supported handshake-era MCP versions and counter-offer 2025-11-25 for unknown/modern initialize requests
+- Clarify that the command allowlist is a process governor, not an OS sandbox
+- Add regression tests for deletion, untracked indexing, active-task replacement, and protocol negotiation
+
 
 ## 1.0.1
 

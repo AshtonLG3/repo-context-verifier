@@ -28,6 +28,13 @@ MAX_AREAS = 40
 MAX_OUTPUT_CHARS = 20_000
 MAX_COMMAND_SECONDS = 900
 MAX_STATUS_CHECKS = 2
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
+LATEST_HANDSHAKE_PROTOCOL = SUPPORTED_PROTOCOL_VERSIONS[0]
 
 SOURCE_SUFFIXES = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".kts", ".go", ".rs",
@@ -80,7 +87,11 @@ def _resolve_root(value: str | None) -> Path:
 
 
 def _tracked_files(root: Path) -> list[str]:
-    listed = _git(root, "ls-files", "-z").split("\0")
+    # Include tracked plus non-ignored untracked source files. This matters while
+    # Codex is creating new files before they have been git-added.
+    listed = _git(
+        root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
+    ).split("\0")
     result: list[str] = []
     for path in listed:
         if not path:
@@ -507,10 +518,21 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
     state = _load_state(root)
     previous = state.get("task")
     if isinstance(previous, dict):
+        if previous.get("status") == "active":
+            replacement = args.get("replace_active_task_id")
+            reason = args.get("replacement_reason", "")
+            if not isinstance(replacement, str) or not replacement or replacement != previous.get("id") or not isinstance(reason, str) or len(reason.strip()) < 10:
+                raise ValueError(
+                    "An active task already exists. Finish it first, or explicitly supersede it "
+                    "using its exact replace_active_task_id and a replacement_reason."
+                )
+            previous["status"] = "superseded"
+            previous["replacement_reason"] = reason.strip()[:500]
+            previous["superseded_at"] = time.time()
         state.setdefault("history", []).append(previous)
         state["history"] = state["history"][-10:]
 
-    task_id = f"{int(time.time())}-{hashlib.sha1(goal.encode('utf-8')).hexdigest()[:8]}"
+    task_id = f"{int(time.time())}-{uuid.uuid4().hex[:12]}"
     task = {
         "id": task_id,
         "goal": goal.strip(),
@@ -1046,6 +1068,8 @@ def _schema_for(name: str) -> dict[str, Any]:
             "required_checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
             "max_context_chars": {"type": "integer", "minimum": 20000, "maximum": 500000},
             "max_context_calls": {"type": "integer", "minimum": 5, "maximum": 80},
+            "replace_active_task_id": {"type": "string"},
+            "replacement_reason": {"type": "string", "minLength": 10},
         })
         required += ["goal", "acceptance", "required_checks"]
     elif name == "context_budget_extend":
@@ -1168,9 +1192,14 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     ident = request.get("id")
 
     if method == "initialize":
-        requested = request.get("params", {}).get("protocolVersion", "2025-06-18")
+        requested = request.get("params", {}).get("protocolVersion")
+        negotiated = (
+            requested
+            if requested in SUPPORTED_PROTOCOL_VERSIONS
+            else LATEST_HANDSHAKE_PROTOCOL
+        )
         result = {
-            "protocolVersion": requested,
+            "protocolVersion": negotiated,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "repo-context-verifier", "version": VERSION},
             "instructions": (

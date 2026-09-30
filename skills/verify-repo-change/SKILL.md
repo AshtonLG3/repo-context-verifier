@@ -8,6 +8,7 @@ description: Govern Codex repository changes with persistent semantic context, a
 1. Confirm the canonical checkout and branch. Do not operate on an accidental duplicate checkout.
 2. Translate the request into observable acceptance criteria. Include success, failure, reset and repeat behaviour when relevant.
 3. Start with `task_begin`, supplying nonempty acceptance criteria and required checks. Required checks must represent what must actually be established before claiming completion.
+   If the user cancels or replaces an active task, use its exact `replace_active_task_id` and a `replacement_reason` to preserve its unfinished history. Never use task replacement to bypass failed checks or context limits.
 4. Use `context_bundle` for first-pass orientation. It may refresh stale semantic memory automatically and should replace broad exploratory reading.
 5. Use `semantic_find`, `dependency_context`, or `change_impact` for focused follow-up. Use `repo_search` or `symbol_context` only when semantic evidence is insufficient.
 6. Respect the context budget. Do not evade duplicate suppression by cosmetically changing the same query. Extend the budget only when more repository context is necessary for correctness and state why.

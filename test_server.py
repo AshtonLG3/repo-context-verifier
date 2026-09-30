@@ -165,6 +165,109 @@ class ServerTests(unittest.TestCase):
             finally:
                 server.CACHE_ROOT = old
 
+    def test_semantic_refresh_removes_deleted_file_rows(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            self.make_repo(root)
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                server.semantic_refresh({"repo_path": str(root)})
+                self.assertTrue(server.semantic_find({
+                    "repo_path": str(root), "query": "show_toast"
+                })["definitions"])
+
+                (root / "scanner.py").unlink()
+                refreshed = server.semantic_refresh({"repo_path": str(root)})
+                self.assertEqual(refreshed["files_removed"], 1)
+                found = server.semantic_find({
+                    "repo_path": str(root), "query": "show_toast"
+                })
+                self.assertEqual(found["definitions"], [])
+                self.assertEqual(found["references"], [])
+            finally:
+                server.CACHE_ROOT = old
+
+    def test_semantic_refresh_indexes_untracked_source_files(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            self.make_repo(root)
+            (root / "new_feature.py").write_text(
+                "def brand_new_symbol():\n    return True\n", encoding="utf-8"
+            )
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                refreshed = server.semantic_refresh({"repo_path": str(root)})
+                self.assertEqual(refreshed["totals"]["files"], 2)
+                found = server.semantic_find({
+                    "repo_path": str(root), "query": "brand_new_symbol"
+                })
+                self.assertTrue(any(
+                    x["path"] == "new_feature.py" for x in found["definitions"]
+                ))
+            finally:
+                server.CACHE_ROOT = old
+
+    def test_active_task_cannot_be_replaced_implicitly(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
+            root = Path(td)
+            self.make_repo(root)
+            old = server.CACHE_ROOT
+            server.CACHE_ROOT = Path(cache)
+            try:
+                first = server.task_begin({
+                    "repo_path": str(root),
+                    "goal": "First task",
+                    "acceptance": ["first complete"],
+                    "required_checks": ["first-check"],
+                })
+                with self.assertRaisesRegex(ValueError, "active task already exists"):
+                    server.task_begin({
+                        "repo_path": str(root),
+                        "goal": "Second task",
+                        "acceptance": ["second complete"],
+                        "required_checks": ["second-check"],
+                    })
+                status = server.task_status({"repo_path": str(root)})
+                self.assertEqual(status["task"]["id"], first["task_id"])
+                self.assertEqual(status["task"]["status"], "active")
+                replacement = {"repo_path": str(root), "goal": "Replacement task",
+                               "acceptance": ["New scope verified"], "required_checks": ["new-check"],
+                               "replacement_reason": "User replaced the original objective"}
+                with self.assertRaises(ValueError):
+                    server.task_begin({**replacement, "replace_active_task_id": "wrong-id"})
+                second = server.task_begin({**replacement, "replace_active_task_id": first["task_id"]})
+                self.assertNotEqual(second["task_id"], first["task_id"])
+                history = server._load_state(server._resolve_root(str(root)))["history"]
+                self.assertEqual(history[-1]["status"], "superseded")
+                self.assertEqual(history[-1]["required_checks"], ["first-check"])
+            finally:
+                server.CACHE_ROOT = old
+
+    def test_initialize_negotiates_only_supported_handshake_versions(self):
+        exact = server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        })
+        self.assertEqual(exact["result"]["protocolVersion"], "2025-06-18")
+
+        unknown = server.handle({
+            "jsonrpc": "2.0", "id": 2, "method": "initialize",
+            "params": {"protocolVersion": "2099-01-01"},
+        })
+        self.assertEqual(
+            unknown["result"]["protocolVersion"], server.LATEST_HANDSHAKE_PROTOCOL
+        )
+
+        modern = server.handle({
+            "jsonrpc": "2.0", "id": 3, "method": "initialize",
+            "params": {"protocolVersion": "2026-07-28"},
+        })
+        self.assertEqual(
+            modern["result"]["protocolVersion"], server.LATEST_HANDSHAKE_PROTOCOL
+        )
+
     def test_context_budget_suppresses_duplicate_requests_and_reports(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
             root = Path(td)

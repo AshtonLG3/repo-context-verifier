@@ -20,7 +20,7 @@ It incrementally stores:
 - symbol reference sites
 - repository HEAD metadata
 
-The index is reused across sessions. Unchanged files are not reparsed.
+The index is reused across sessions. Unchanged files are not reparsed. Non-ignored untracked source files are included so newly created Codex files participate before `git add`, and deleted files are purged from semantic rows during refresh.
 
 Core tools:
 
@@ -75,7 +75,7 @@ Tools:
 
 ### Verification and completion gate
 
-A task begins with observable acceptance criteria and required evidence:
+A task begins with observable acceptance criteria and required evidence. A second task cannot silently replace an active task. Complete it first, or explicitly supersede a cancelled/obsolete task using its exact `replace_active_task_id` and a concrete `replacement_reason` in `task_begin`. The prior task and evidence are preserved in history and are never marked complete. Do not use replacement to evade failed checks or budgets.
 
 - `task_begin`
 - `record_verification`
@@ -172,6 +172,7 @@ Sentinel deliberately does **not** claim that:
 - static evidence proves user-visible runtime behaviour
 - it can discover every dependency created through reflection, generated code, dynamic dispatch, dependency injection or framework magic
 - installing Sentinel guarantees a particular percentage of quota savings
+- the command allowlist is an OS security sandbox
 
 Those claims should be measured empirically on comparable tasks.
 
@@ -204,3 +205,8 @@ The suite covers:
 ## Design principle
 
 **Keep the strongest model where its reasoning matters. Spend less of its turn rediscovering, waiting and re-reading.**
+
+
+## MCP protocol compatibility
+
+Sentinel v1.1.0 implements the handshake-era MCP stdio lifecycle and explicitly supports `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`. During `initialize`, a supported client offer is accepted; an unknown or modern-era version is counter-offered as `2025-11-25`. Sentinel does not currently implement the sessionless `2026-07-28` `server/discover` lifecycle.
