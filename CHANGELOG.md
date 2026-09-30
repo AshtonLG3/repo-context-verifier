@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0
+
+- Reject empty or blank acceptance criteria and required checks, including legacy empty completion plans.
+- Require passing verification to reference a successful Sentinel command or hashed observation files; text alone cannot pass.
+- Recheck source inputs and evidence hashes at completion, and block any recorded failure.
+- Compare artifacts before and after builds. Unchanged artifacts pass only with a prior successful record for the same command, inputs, and artifact hash.
+- Label reported observations explicitly: file integrity does not prove the observation is true.
+- Add regression tests for old artifacts, cached builds, tampering, stale verification, empty plans, and invented command evidence.
+- Integrate semantic freshness and protocol fixes from 1.0.2; explicitly superseded tasks preserve their failed/unfinished evidence in history.
+
 ## 1.0.2
 
 - Purge stale semantic rows when indexed files are deleted or become unreadable
@@ -17,8 +27,6 @@
 - Added an end-to-end test through the official MCP Python client SDK
 - Added best-effort redaction for common credentials in returned source snippets and governed command output
 - Kept runtime dependencies standard-library-only; the MCP SDK is test-only
-
-# Changelog
 
 ## 1.0.0
 

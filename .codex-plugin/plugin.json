@@ -1,6 +1,6 @@
 {
   "name": "repo-context-verifier",
-  "version": "1.0.2",
+  "version": "1.1.0+codex.20260930001304",
   "description": "Local Codex control bridge with persistent semantic repo memory, adaptive context budgets, process governance, artifact-aware stopping, and evidence-based completion.",
   "author": {
     "name": "AshtonLG3"
@@ -8,7 +8,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Repo Context Verifier",
-    "shortDescription": "Semantic memory, context budget and stop controller",
+    "shortDescription": "Repo context and verification",
     "longDescription": "Local MCP bridge that persistently indexes repository structure, ranks compact context, suppresses duplicate context, governs builds and deployment polling, verifies artifacts, and blocks completion until required evidence is recorded.",
     "developerName": "AshtonLG3",
     "category": "Productivity",
