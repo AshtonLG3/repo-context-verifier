@@ -71,7 +71,7 @@ Tools:
 
 `build_artifact` snapshots matching files before and after a bounded build. It returns `BUILD_COMPLETE` only when the command succeeds, inputs stay unchanged, and an artifact is newly produced or updated. Unchanged cached output is accepted only when a prior successful build record matches the command, source inputs and artifact hash. An unrelated successful command cannot validate an old APK. Artifact existence does not prove Android signing, version, installation or runtime behavior; those need separate checks.
 
-`external_status` is intentionally limited to two checks per task key. It is meant for asynchronous systems such as Railway where repeated polling can consume time and agent context without improving the code change.
+`external_status` permits 30 checks per deployment key, spaced at least 30 seconds apart. Calls made too soon return `POLLING_TOO_SOON` and `retry_after_seconds` without running a command or spending a check. Keep the same key until deployment reaches a terminal state and verify the public runtime. If the user explicitly authorizes continued verification, `continuation_reason` extends an exhausted budget by 30 checks, up to 120 total; the reason is retained in task state. Exhaustion never establishes deployment success.
 
 ### Verification and completion gate
 
