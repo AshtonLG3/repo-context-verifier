@@ -89,7 +89,7 @@ class ServerTests(unittest.TestCase):
             finally:
                 server.CACHE_ROOT = old
 
-    def test_external_status_is_hard_limited(self):
+    def test_external_status_spaced_budget_and_authorized_continuation(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as cache:
             root = Path(td)
             self.make_repo(root)
@@ -105,12 +105,40 @@ class ServerTests(unittest.TestCase):
                 args = {"repo_path": str(root), "argv": ["railway", "status"], "key": "railway"}
                 fake = {"argv": ["railway", "status"], "returncode": 0, "timed_out": False,
                         "duration_seconds": 0.01, "output": "healthy", "output_truncated": False}
-                with patch.object(server, "_run_process", return_value=fake):
+                with patch.object(server, "_run_process", return_value=fake) as run, patch.object(server.time, "time", return_value=1000) as clock:
                     self.assertFalse(server.external_status(args)["blocked"])
-                    self.assertFalse(server.external_status(args)["blocked"])
-                    third = server.external_status(args)
-                self.assertTrue(third["blocked"])
-                self.assertEqual(third["reason"], "POLLING_BUDGET_EXHAUSTED")
+                    immediate = server.external_status(args)
+                    self.assertEqual(immediate["reason"], "POLLING_TOO_SOON")
+                    self.assertEqual(immediate["retry_after_seconds"], 30)
+                    self.assertEqual(run.call_count, 1)
+                    for i in range(1, server.MAX_STATUS_CHECKS):
+                        clock.return_value = 1000 + i * 31
+                        self.assertFalse(server.external_status(args)["blocked"])
+                    clock.return_value += 31
+                    exhausted = server.external_status(args)
+                    self.assertEqual(exhausted["reason"], "POLLING_BUDGET_EXHAUSTED")
+                    self.assertEqual(run.call_count, server.MAX_STATUS_CHECKS)
+                    with self.assertRaises(ValueError):
+                        server.external_status({**args, "continuation_reason": " "})
+                    extended = server.external_status({**args, "continuation_reason": "User requested continued verification"})
+                    self.assertFalse(extended["blocked"])
+                    self.assertEqual(extended["checks_used"], 31)
+                    self.assertEqual(extended["checks_remaining"], 29)
+                    state, _ = server._current_task(server._resolve_root(str(root)))
+                    self.assertEqual(state["status_polling"]["railway"]["continuations"][0]["reason"], "User requested continued verification")
+                    state["status_checks"]["railway"] = server.MAX_EXTENDED_STATUS_CHECKS
+                    state["status_polling"]["railway"]["max_checks"] = server.MAX_EXTENDED_STATUS_CHECKS
+                    server._save_state(server._resolve_root(str(root)), state)
+                    clock.return_value += 31
+                    ceiling = server.external_status({**args, "continuation_reason": "Continue again"})
+                    self.assertTrue(ceiling["blocked"])
+                    self.assertEqual(ceiling["max_checks"], 120)
+                    state, _ = server._current_task(server._resolve_root(str(root)))
+                    state["status_checks"]["legacy"] = 2
+                    server._save_state(server._resolve_root(str(root)), state)
+                    migrated = server.external_status({**args, "key": "legacy"})
+                    self.assertFalse(migrated["blocked"])
+                    self.assertEqual(migrated["checks_used"], 3)
             finally:
                 server.CACHE_ROOT = old
 
@@ -365,7 +393,7 @@ class ServerTests(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), 1)
         payload = json.loads(lines[0])
-        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.1.0")
+        self.assertEqual(payload["result"]["serverInfo"]["version"], "1.1.1")
         self.assertIn("stop running tools", payload["result"]["instructions"])
 
     def test_returned_source_context_redacts_common_secret_values(self):

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- Replace the two-check deployment hard stop with 30 checks spaced at least 30 seconds apart.
+- Allow user-authorized continuation on the same deployment key, with an audited reason and 120-check ceiling.
+- Preserve legacy polling counts, cooldowns across restarts, and required runtime verification.
+
 ## 1.1.0
 
 - Reject empty or blank acceptance criteria and required checks, including legacy empty completion plans.

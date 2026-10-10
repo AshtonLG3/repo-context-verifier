@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -21,13 +22,15 @@ from typing import Any
 import semantic_index
 import context_budget
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 MAX_FILES = 4000
 MAX_MATCHES = 50
 MAX_AREAS = 40
 MAX_OUTPUT_CHARS = 20_000
 MAX_COMMAND_SECONDS = 900
-MAX_STATUS_CHECKS = 2
+MAX_STATUS_CHECKS = 30
+MAX_EXTENDED_STATUS_CHECKS = 120
+STATUS_POLL_INTERVAL = 30
 SUPPORTED_PROTOCOL_VERSIONS = (
     "2025-11-25",
     "2025-06-18",
@@ -552,6 +555,7 @@ def task_begin(args: dict[str, Any]) -> dict[str, Any]:
     }
     state["task"] = task
     state["status_checks"] = {}
+    state["status_polling"] = {}
     _save_state(root, state)
     return {
         "task_id": task_id,
@@ -864,20 +868,43 @@ def external_status(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Task is not active; external polling is closed after completion")
     checks = state.setdefault("status_checks", {})
     used = int(checks.get(key, 0))
-    if used >= MAX_STATUS_CHECKS:
+    polling = state.setdefault("status_polling", {}).setdefault(key, {})
+    allowance = int(polling.get("max_checks", MAX_STATUS_CHECKS))
+    now = time.time()
+    last_checked = polling.get("last_checked_at")
+    if last_checked is not None and now - last_checked < STATUS_POLL_INTERVAL:
+        return {
+            "blocked": True,
+            "reason": "POLLING_TOO_SOON",
+            "retry_after_seconds": math.ceil(STATUS_POLL_INTERVAL - (now - last_checked)),
+            "checks_used": used,
+            "guidance": "Wait for retry_after_seconds; keep the same deployment key.",
+        }
+    continuation = args.get("continuation_reason")
+    if continuation is not None and (not isinstance(continuation, str) or not continuation.strip()):
+        raise ValueError("continuation_reason must be a nonempty explanation of user-authorized continued verification")
+    if used >= allowance and continuation and allowance < MAX_EXTENDED_STATUS_CHECKS:
+        allowance = min(MAX_EXTENDED_STATUS_CHECKS, allowance + MAX_STATUS_CHECKS)
+        polling["continuations"] = polling.get("continuations", []) + [
+            {"reason": continuation.strip(), "at": now, "max_checks": allowance}
+        ]
+    if used >= allowance:
         return {
             "blocked": True,
             "reason": "POLLING_BUDGET_EXHAUSTED",
             "checks_used": used,
-            "max_checks": MAX_STATUS_CHECKS,
+            "max_checks": allowance,
             "guidance": (
-                "The external system is asynchronous. Stop polling in this task unless the user "
-                "explicitly requests continued verification."
+                "Deployment is still unverified. When the user authorizes continued verification, "
+                "supply continuation_reason on this same key to add 30 checks, up to 120 total. "
+                "Do not mark the task complete or change keys to bypass the budget."
             ),
         }
 
     result = _run_process(root, argv, min(int(args.get("timeout_seconds", 60)), 60))
     checks[key] = used + 1
+    polling["last_checked_at"] = time.time()
+    polling["max_checks"] = allowance
     task["commands"] = int(task.get("commands", 0)) + 1
     task["output_chars"] = int(task.get("output_chars", 0)) + len(result["output"])
     state["task"] = task
@@ -888,9 +915,11 @@ def external_status(args: dict[str, Any]) -> dict[str, Any]:
         **result,
         "blocked": False,
         "checks_used": checks[key],
-        "checks_remaining": MAX_STATUS_CHECKS - checks[key],
+        "checks_remaining": allowance - checks[key],
+        "retry_after_seconds": STATUS_POLL_INTERVAL,
         "guidance": (
-            "Do not repeatedly poll asynchronous deployments. A second status check is the hard limit for this task."
+            "Wait at least 30 seconds before the next check. Continue until the deployment finishes "
+            "or needs action; verify the public runtime before recording a deployment pass."
         ),
     }
 
@@ -1017,7 +1046,7 @@ TOOLS = {
     "run_bounded_command": (run_bounded_command, "Run one allowlisted local build/test/read command with a hard timeout and capped output."),
     "build_artifact": (build_artifact, "Run an allowlisted bounded build and verify that the expected artifact exists before returning."),
     "artifact_status": (artifact_status, "Inspect matching artifacts without starting or polling a build process."),
-    "external_status": (external_status, "Run a bounded Railway status/logs command; at most two checks per task key."),
+    "external_status": (external_status, "Run a bounded Railway status/logs command; 30 spaced checks per key, extendable with user authorization."),
     "record_verification": (record_verification, "Record pass/fail/unverified evidence for a task verification check."),
     "task_finish": (task_finish, "Finish only when every required verification check has passing evidence."),
 }
@@ -1100,6 +1129,7 @@ def _schema_for(name: str) -> dict[str, Any]:
         properties.update({
             "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
             "key": {"type": "string", "default": "deployment"},
+            "continuation_reason": {"type": "string", "minLength": 1},
             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
         })
         required.append("argv")
@@ -1206,8 +1236,9 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
                 "Start governed implementation work with task_begin. Prefer context_bundle for first-pass orientation, "
                 "then semantic_find, dependency_context, or change_impact for focused follow-up. Exact duplicate context "
                 "requests on an unchanged worktree are suppressed and context pressure is budgeted per task. Prefer "
-                "build_artifact over manually waiting on build processes. external_status is limited to two checks per "
-                "task key. Record direct evidence for required checks. If task_finish succeeds, stop running tools."
+                "build_artifact over manually waiting on build processes. external_status allows 30 checks per "
+                "key spaced at least 30 seconds apart, extendable with explicit user authorization. "
+                "Record direct evidence for required checks. If task_finish succeeds, stop running tools."
             ),
         }
     elif method == "tools/list":
